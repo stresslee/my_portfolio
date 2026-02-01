@@ -1,666 +1,463 @@
-"use client";
+"use client"
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import gsap from "gsap";
+import React, { useEffect, useRef, useState } from "react"
+import gsap from "gsap"
 
-type MediaItem = { type: "image" | "video"; src: string; title: string };
+type TileModel = { col: number; row: number; id: string }
+type TileRefs = { el: HTMLDivElement | null; img: HTMLImageElement | null }
+type TileSetters = { setX: ((v: number) => void) | null; setY: ((v: number) => void) | null }
 
-function hash2(col: number, row: number, mod: number) {
-  let x = col | 0;
-  let y = row | 0;
-  let h = x * 374761393 + y * 668265263;
-  h = (h ^ (h >>> 13)) * 1274126177;
-  h = h ^ (h >>> 16);
-  h >>>= 0;
-  return h % mod;
-}
+const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v))
+const expAlpha = (dt: number, tau: number) => 1 - Math.exp(-dt / Math.max(1e-6, tau))
+const keyOf = (c: number, r: number) => `${c},${r}`
 
-// 1,4,8,12… = Manhattan ring
-function manhattanRing(col: number, row: number, ocol: number, orow: number) {
-  return Math.abs(col - ocol) + Math.abs(row - orow);
-}
-
-function clamp(v: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, v));
+function seed01(a: number, b: number) {
+  let h = ((a * 73856093) ^ (b * 19349663)) >>> 0
+  h ^= h << 13
+  h ^= h >>> 17
+  h ^= h << 5
+  return (h >>> 0) / 4294967295
 }
 
 export default function Experience() {
-  // ========= DEBUG =========
-  const DEBUG = true;
+  // ===== Layout =====
+  const TILE = 130
+  const GAP = 140
+  const SPAN = TILE + GAP
+  const RADIUS = 6
+  const WRAP_MARGIN = 2
 
-  // ===== CONFIG =====
-  const TILE_SIZE = 160;
-  const GAP = 100;
-  const CELL = TILE_SIZE + GAP;
+  // ===== Inertia (약 0.5초 감각) =====
+  const FRICTION = 13.5
+  const MAX_VEL = 5200
 
-  const OVERSCAN = 2;
-  const RADIUS = 16;
+  // ===== pan smoothing =====
+  const PAN_VIEW_TAU_DRAG = 0.14
+  const PAN_VIEW_TAU_IDLE = 0.08
 
-  // img 움직일 때 빈틈 방지
-  const MEDIA_SCALE = 1.16;
+  // ===== Ripple timing (Framer-like) =====
+  const RIPPLE_BASE_DUR = 0.5
+  const RIPPLE_STEP_DUR = 0.3
+  const RIPPLE_MAX_DUR = 3.2
+  const RIPPLE_MAX_RING = 10
 
-  // parallax
-  const PARALLAX_STRENGTH = 50;
+  // 🔥 2배 빠르게: tau 절반
+  const durToTau = (dur: number) => dur / 6
 
-  // inertia
-  const INERTIA_MIN_SPEED = 30;
-  const INERTIA_STOP_SPEED = 8;
-  const FRICTION_BASE = 0.06;
-
-  // ripple follow
-  const DRAG_BASE_TAU = 0.22; // ring0
-  const DRAG_STEP_TAU = 0.028; // 멀리도 따라오게
-  const DRAG_MAX_TAU = 0.55;
-
-  const SETTLE_BASE_TAU = 0.12;
-  const SETTLE_STEP_TAU = 0.03;
-  const SETTLE_MAX_TAU = 0.4;
-
-  const RIPPLE_STRENGTH = 1.25;
-  const RIPPLE_MAX_OFFSET = 32;
-
-  const SETTLE_EPS = 0.45;
-  const SETTLE_STABLE_FRAMES = 12;
-
-  // ✅ wrap이 화면 “밖”에서만 일어나도록 큰 마진
-  //    - 기존처럼 minX=-CELL*3 같은 얕은 임계값이면, 타일이 아직 보이는 상태에서 wrap됨
-  const WRAP_MARGIN = CELL * (OVERSCAN + 4) + TILE_SIZE; // 충분히 크게
-
-  // ===== MEDIA =====
-  const mediaList: MediaItem[] = useMemo(
-    () => [
-      { type: "image", src: "https://images.unsplash.com/photo-1669205022521-35fd91a450cc?w=400&h=400&fit=crop", title: "Project 1" },
-      { type: "image", src: "https://images.unsplash.com/photo-1763142275482-f9f7f98b8bd6?w=400&h=400&fit=crop", title: "Project 2" },
-      { type: "image", src: "https://images.unsplash.com/photo-1768638687895-b5ee4a586c7f?w=400&h=400&fit=crop", title: "Project 3" },
-      { type: "image", src: "https://images.unsplash.com/photo-1534422298391-e4f8c172dddb?w=400&h=400&fit=crop", title: "Project 4" },
-      { type: "image", src: "https://images.unsplash.com/photo-1768268004424-0f30eb142ca3?w=400&h=400&fit=crop", title: "Project 5" },
-      { type: "video", src: "https://res.cloudinary.com/dmtfoxbgo/video/upload/w_400,h_400,c_fill/samples/dance-2.mp4", title: "Dance Video" },
-      { type: "video", src: "https://res.cloudinary.com/dmtfoxbgo/video/upload/w_400,h_400,c_fill/samples/sea-turtle.mp4", title: "Sea Turtle Video" },
-      { type: "image", src: "https://images.unsplash.com/photo-1510832198440-a52376950479?w=400&h=400&fit=crop", title: "Project 6" },
-      { type: "image", src: "https://images.unsplash.com/photo-1660563115496-8040aa23fc81?w=400&h=400&fit=crop", title: "Project 7" },
-      { type: "image", src: "https://plus.unsplash.com/premium_photo-1674498703651-86f8f1e41df9?w=400&h=400&fit=crop", title: "Project 8" },
-      { type: "image", src: "https://images.unsplash.com/photo-1484446991649-77f7fbd73f1f?w=400&h=400&fit=crop", title: "Project 9" },
-      { type: "image", src: "https://images.unsplash.com/photo-1526511253005-9a4a8cde2956?w=400&h=400&fit=crop", title: "Project 10" },
-      { type: "image", src: "https://plus.unsplash.com/premium_photo-1668638806052-4544af05f648?w=400&h=400&fit=crop", title: "Project 11" },
-      { type: "image", src: "https://images.unsplash.com/photo-1499557354967-2b2d8910bcca?w=400&h=400&fit=crop", title: "Project 12" },
-      { type: "image", src: "https://images.unsplash.com/photo-1534083220759-4c3c00112ea0?w=400&h=400&fit=crop", title: "Project 13" },
-      { type: "image", src: "https://images.unsplash.com/photo-1575186083127-03641b958f61?w=400&h=400&fit=crop", title: "Project 14" },
-    ],
-    []
-  );
-
-  // ===== refs =====
-  const rootRef = useRef<HTMLDivElement | null>(null);
-
-  const viewport = useRef({ w: 0, h: 0 });
-  const [poolDims, setPoolDims] = useState<{ cols: number; rows: number }>({ cols: 0, rows: 0 });
-
-  const resizing = useRef(false);
-  const resizeTimer = useRef<number | null>(null);
-
-  const dragging = useRef(false);
-
-  const panTarget = useRef({ x: 0, y: 0 });
-  const view = useRef({ x: 0, y: 0 });
-
-  const parallax = useRef({ x: 0, y: 0 });
-
-  const dragStart = useRef({ x: 0, y: 0 });
-  const panStart = useRef({ x: 0, y: 0 });
-
-  const inertia = useRef({ vx: 0, vy: 0, active: false });
-  const lastMove = useRef<{ x: number; y: number; t: number } | null>(null);
-
-  // ripple
-  const rippleOrigin = useRef<{ col: number; row: number } | null>(null);
-  const rippleMode = useRef<"idle" | "drag" | "settle">("idle");
-  const settleStable = useRef(0);
-  const ringFollow = useRef<Map<number, { x: number; y: number }>>(new Map());
-
-  // debug counters
-  const dbg = useRef({ wraps: 0, swaps: 0, maxOff: 0 });
-  const dbgElRef = useRef<HTMLDivElement | null>(null);
-  const dbgSetText = useRef<((v: string) => void) | null>(null);
-
-  type PoolCell = {
-    setTX: (v: number) => void;
-    setTY: (v: number) => void;
-    setMX: (v: number) => void;
-    setMY: (v: number) => void;
-
-    col: number;
-    row: number;
-
-    mediaKey: string;
-    ring: number;
-
-    img: HTMLImageElement;
-  };
-
-  const pool = useRef<PoolCell[]>([]);
-
-  // ===== pool dims init/resize =====
+  // ===== manifest =====
+  const [manifest, setManifest] = useState<{ ids: string[]; srcById: Record<string, string>; error?: string } | null>(
+    null
+  )
   useEffect(() => {
-    const compute = () => {
-      const w = window.innerWidth;
-      const h = window.innerHeight;
-      viewport.current = { w, h };
-
-      const cols = Math.ceil(w / CELL) + OVERSCAN * 2 + 1;
-      const rows = Math.ceil(h / CELL) + OVERSCAN * 2 + 1;
-
-      setPoolDims({ cols, rows });
-    };
-
-    compute();
-
-    const onResize = () => {
-      resizing.current = true;
-
-      inertia.current.active = false;
-      inertia.current.vx = 0;
-      inertia.current.vy = 0;
-
-      if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
-      resizeTimer.current = window.setTimeout(() => {
-        compute();
-        resizing.current = false;
-      }, 140);
-    };
-
-    window.addEventListener("resize", onResize, { passive: true });
+    let alive = true
+    fetch("/api/pf-manifest", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((j) => alive && setManifest(j))
+      .catch((e) => alive && setManifest({ ids: [], srcById: {}, error: String(e) }))
     return () => {
-      window.removeEventListener("resize", onResize);
-      if (resizeTimer.current) window.clearTimeout(resizeTimer.current);
-    };
-  }, [CELL]);
+      alive = false
+    }
+  }, [])
 
-  // ===== parallax =====
-  useEffect(() => {
-    let rafId: number | null = null;
-    let mx = 0;
-    let my = 0;
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  const [renderIds, setRenderIds] = useState<number[]>([])
 
-    const onMove = (e: MouseEvent) => {
-      mx = e.clientX;
-      my = e.clientY;
-      if (rafId) return;
+  const tilesRef = useRef<TileModel[]>([])
+  const refsRef = useRef<TileRefs[]>([])
+  const settersRef = useRef<TileSetters[]>([])
+  const lastIdByTile = useRef<string[]>([])
 
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        if (dragging.current) return;
+  // coord -> id (인접 중복 최소화용)
+  const coordIdRef = useRef<Map<string, string>>(new Map())
 
-        const { w, h } = viewport.current;
-        const cx = w / 2;
-        const cy = h / 2;
-        const nx = (mx - cx) / cx;
-        const ny = (my - cy) / cy;
+  // viewport/pool
+  const viewW = useRef(0)
+  const viewH = useRef(0)
+  const poolCols = useRef(0)
+  const poolRows = useRef(0)
 
-        parallax.current.x = -nx * PARALLAX_STRENGTH;
-        parallax.current.y = -ny * PARALLAX_STRENGTH;
-      });
-    };
+  // RAF
+  const rafId = useRef<number | null>(null)
+  const lastT = useRef(0)
+  const resizing = useRef(false)
+  const pendingBind = useRef(false)
+  const resizeTimer = useRef<number | null>(null)
 
-    window.addEventListener("mousemove", onMove, { passive: true });
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      if (rafId) cancelAnimationFrame(rafId);
-    };
-  }, []);
+  // world motion
+  const panTarget = useRef({ x: 0, y: 0 })
+  const panView = useRef({ x: 0, y: 0 })
+  const panVel = useRef({ x: 0, y: 0 })
 
-  // ===== pointer drag =====
-  useEffect(() => {
-    const el = rootRef.current;
-    if (!el) return;
+  // per-tile follower (Framer tileX/tileY)
+  const tileViewX = useRef<number[]>([])
+  const tileViewY = useRef<number[]>([])
 
-    const onDown = (ev: PointerEvent) => {
-      (ev.target as HTMLElement)?.setPointerCapture?.(ev.pointerId);
+  // input
+  const isDown = useRef(false)
+  const pointerId = useRef<number | null>(null)
+  const lastP = useRef({ x: 0, y: 0 })
+  const dragStartPos = useRef<{ x: number; y: number } | null>(null)
 
-      dragging.current = true;
-      inertia.current.active = false;
+  function ensureArrays(n: number) {
+    if (tileViewX.current.length !== n) tileViewX.current = new Array(n).fill(0)
+    if (tileViewY.current.length !== n) tileViewY.current = new Array(n).fill(0)
+    if (lastIdByTile.current.length !== n) lastIdByTile.current = new Array(n).fill("")
+  }
 
-      dragStart.current = { x: ev.clientX, y: ev.clientY };
-      panStart.current = { ...panTarget.current };
-      lastMove.current = { x: ev.clientX, y: ev.clientY, t: performance.now() };
+  function pickIdNoAdjRepeat(col: number, row: number, ids: string[]) {
+    if (ids.length <= 1) return ids[0] ?? "00"
+    const map = coordIdRef.current
+    const L = map.get(keyOf(col - 1, row))
+    const R = map.get(keyOf(col + 1, row))
+    const U = map.get(keyOf(col, row - 1))
+    const D = map.get(keyOf(col, row + 1))
+    const bad = (id: string) => id === L || id === R || id === U || id === D
 
-      const worldX = ev.clientX - view.current.x;
-      const worldY = ev.clientY - view.current.y;
-      const col = Math.round(worldX / CELL);
-      const row = Math.round(worldY / CELL);
-      rippleOrigin.current = { col, row };
+    let idx = Math.floor(seed01(col, row) * ids.length) % ids.length
+    for (let k = 0; k < 18 && bad(ids[idx]); k++) idx = (idx + 1) % ids.length
+    return ids[idx]
+  }
 
-      // seed followers from current view (jump 방지)
-      ringFollow.current.clear();
-      ringFollow.current.set(0, { x: view.current.x, y: view.current.y });
+  function applyTileImage(i: number, srcById: Record<string, string>) {
+    const img = refsRef.current[i]?.img
+    if (!img) return
 
-      // drag 중 parallax off
-      parallax.current.x = 0;
-      parallax.current.y = 0;
+    const id = tilesRef.current[i].id
+    if (lastIdByTile.current[i] === id) return
+    lastIdByTile.current[i] = id
 
-      rippleMode.current = "drag";
-      settleStable.current = 0;
-    };
-
-    const onMove = (ev: PointerEvent) => {
-      if (!dragging.current) return;
-
-      const dx = ev.clientX - dragStart.current.x;
-      const dy = ev.clientY - dragStart.current.y;
-
-      panTarget.current.x = panStart.current.x + dx;
-      panTarget.current.y = panStart.current.y + dy;
-
-      const now = performance.now();
-      const prev = lastMove.current;
-      if (prev) {
-        const dms = Math.max(1, now - prev.t);
-        inertia.current.vx = ((ev.clientX - prev.x) / dms) * 1000;
-        inertia.current.vy = ((ev.clientY - prev.y) / dms) * 1000;
-      }
-      lastMove.current = { x: ev.clientX, y: ev.clientY, t: now };
-    };
-
-    const onUp = () => {
-      if (!dragging.current) return;
-
-      dragging.current = false;
-      lastMove.current = null;
-
-      const speed = Math.hypot(inertia.current.vx, inertia.current.vy);
-      if (speed > INERTIA_MIN_SPEED) {
-        inertia.current.active = true;
-      } else {
-        inertia.current.active = false;
-        inertia.current.vx = 0;
-        inertia.current.vy = 0;
-      }
-
-      rippleMode.current = "settle";
-      settleStable.current = 0;
-    };
-
-    el.addEventListener("pointerdown", onDown);
-    window.addEventListener("pointermove", onMove, { passive: true });
-    window.addEventListener("pointerup", onUp, { passive: true });
-    window.addEventListener("pointercancel", onUp, { passive: true });
-
-    return () => {
-      el.removeEventListener("pointerdown", onDown);
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-    };
-  }, [CELL, INERTIA_MIN_SPEED]);
-
-  // ===== pool nodes =====
-  const poolNodes = useMemo(() => {
-    const { cols, rows } = poolDims;
-    if (!cols || !rows) return [];
-
-    const total = cols * rows;
-    return new Array(total).fill(0).map((_, i) => (
-      <div
-        key={`p-${i}`}
-        data-pool-index={i}
-        style={{
-          position: "absolute",
-          width: TILE_SIZE,
-          height: TILE_SIZE,
-          borderRadius: RADIUS,
-          overflow: "hidden",
-          background: "rgba(255,255,255,0.06)",
-          boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
-          willChange: "transform",
-        }}
-      >
-        <img
-          data-media
-          draggable={false}
-          alt=""
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            display: "block",
-            borderRadius: RADIUS,
-            willChange: "transform",
-          }}
-        />
-      </div>
-    ));
-  }, [poolDims.cols, poolDims.rows]);
-
-  // ===== capture pool refs + init stable col/row =====
-  useEffect(() => {
-    const root = rootRef.current;
-    if (!root) return;
-
-    if (DEBUG && dbgElRef.current && !dbgSetText.current) {
-      dbgSetText.current = gsap.quickSetter(dbgElRef.current, "textContent") as any;
+    const src = srcById[id]
+    if (!src) {
+      img.removeAttribute("src")
+      img.style.opacity = "0"
+      return
     }
 
-    const tiles = Array.from(root.querySelectorAll<HTMLDivElement>("[data-pool-index]"));
-    if (!tiles.length) return;
+    // assign
+    if (img.src !== src) img.src = src
+    img.style.opacity = "1"
+  }
 
-    const cols = poolDims.cols;
-    const rows = poolDims.rows;
-    if (!cols || !rows) return;
+  function buildPool(vw: number, vh: number, ids: string[]) {
+    const cols = Math.ceil(vw / SPAN) + WRAP_MARGIN * 2 + 2
+    const rows = Math.ceil(vh / SPAN) + WRAP_MARGIN * 2 + 2
+    poolCols.current = cols
+    poolRows.current = rows
+    viewW.current = vw
+    viewH.current = vh
 
-    pool.current = new Array(cols * rows);
+    const tiles: TileModel[] = []
+    const refs: TileRefs[] = []
+    const setters: TileSetters[] = []
 
-    let idx = 0;
+    const map = new Map<string, string>()
+    coordIdRef.current = map
+
+    const sc = -Math.floor(cols / 2)
+    const sr = -Math.floor(rows / 2)
+
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const tile = tiles[idx];
-        const img = tile.querySelector<HTMLImageElement>("[data-media]")!;
-        gsap.set(tile, { x: 0, y: 0, force3D: true });
-        gsap.set(img, { x: 0, y: 0, scale: MEDIA_SCALE, transformOrigin: "50% 50%", force3D: true });
+        const col = sc + c
+        const row = sr + r
+        const id = pickIdNoAdjRepeat(col, row, ids)
+        map.set(keyOf(col, row), id)
 
-        const setTX = gsap.quickSetter(tile, "x", "px") as any;
-        const setTY = gsap.quickSetter(tile, "y", "px") as any;
-        const setMX = gsap.quickSetter(img, "x", "px") as any;
-        const setMY = gsap.quickSetter(img, "y", "px") as any;
-
-        // 초기 월드 좌표(고정)
-        const worldCol = c - OVERSCAN;
-        const worldRow = r - OVERSCAN;
-
-        pool.current[idx] = {
-          setTX,
-          setTY,
-          setMX,
-          setMY,
-          col: worldCol,
-          row: worldRow,
-          mediaKey: "",
-          ring: 0,
-          img,
-        };
-
-        idx++;
+        tiles.push({ col, row, id })
+        refs.push({ el: null, img: null })
+        setters.push({ setX: null, setY: null })
       }
     }
 
-    // reset motion
-    panTarget.current = { x: 0, y: 0 };
-    view.current = { x: 0, y: 0 };
-    inertia.current = { vx: 0, vy: 0, active: false };
-    parallax.current = { x: 0, y: 0 };
+    tilesRef.current = tiles
+    refsRef.current = refs
+    settersRef.current = setters
 
-    rippleMode.current = "idle";
-    rippleOrigin.current = null;
-    ringFollow.current.clear();
-    settleStable.current = 0;
+    ensureArrays(tiles.length)
 
-    dbg.current.wraps = 0;
-    dbg.current.swaps = 0;
-    dbg.current.maxOff = 0;
-  }, [poolDims.cols, poolDims.rows, DEBUG]);
+    // 초기 표시 위치를 base로 맞춤 (초기 튐 방지)
+    for (let i = 0; i < tiles.length; i++) {
+      tileViewX.current[i] = tiles[i].col * SPAN + panView.current.x
+      tileViewY.current[i] = tiles[i].row * SPAN + panView.current.y
+    }
 
-  // ===== main RAF =====
+    setRenderIds(Array.from({ length: tiles.length }, (_, i) => i))
+  }
+
+  function bindSettersAndImages(srcById: Record<string, string>) {
+    for (let i = 0; i < refsRef.current.length; i++) {
+      const el = refsRef.current[i]?.el
+      const img = refsRef.current[i]?.img
+      if (!el || !img) continue
+
+      gsap.set(el, { x: 0, y: 0, force3D: true })
+      settersRef.current[i].setX = gsap.quickSetter(el, "x", "px") as any
+      settersRef.current[i].setY = gsap.quickSetter(el, "y", "px") as any
+
+      applyTileImage(i, srcById)
+    }
+  }
+
+  function wrapIfNeeded(i: number, ids: string[], srcById: Record<string, string>) {
+    const t = tilesRef.current[i]
+    const vw = viewW.current
+    const vh = viewH.current
+
+    // base 기준으로 밖으로 나갔는지 판단
+    const bx = t.col * SPAN + panView.current.x
+    const by = t.row * SPAN + panView.current.y
+
+    const L = -SPAN * (WRAP_MARGIN + 1)
+    const R = vw + SPAN * (WRAP_MARGIN + 1)
+    const T = -SPAN * (WRAP_MARGIN + 1)
+    const B = vh + SPAN * (WRAP_MARGIN + 1)
+
+    let moved = false
+    const oc = t.col
+    const or = t.row
+
+    if (bx < L) {
+      t.col += poolCols.current
+      moved = true
+    } else if (bx > R) {
+      t.col -= poolCols.current
+      moved = true
+    }
+    if (by < T) {
+      t.row += poolRows.current
+      moved = true
+    } else if (by > B) {
+      t.row -= poolRows.current
+      moved = true
+    }
+
+    if (moved) {
+      // 화면 밖에서만 콘텐츠 교체
+      const map = coordIdRef.current
+      map.delete(keyOf(oc, or))
+
+      t.id = pickIdNoAdjRepeat(t.col, t.row, ids)
+      map.set(keyOf(t.col, t.row), t.id)
+
+      applyTileImage(i, srcById)
+
+      // wrap 순간 표시 좌표도 base로 보정 (겹침/튐 방지)
+      tileViewX.current[i] = t.col * SPAN + panView.current.x
+      tileViewY.current[i] = t.row * SPAN + panView.current.y
+    }
+  }
+
+  function computeTau(baseX: number, baseY: number) {
+    const ds = dragStartPos.current
+    if (!ds) return durToTau(RIPPLE_BASE_DUR)
+
+    const cx = baseX + TILE * 0.5
+    const cy = baseY + TILE * 0.5
+    const dist = Math.hypot(cx - ds.x, cy - ds.y)
+    const ring = clamp(Math.floor(dist / SPAN), 0, RIPPLE_MAX_RING)
+    const dur = clamp(RIPPLE_BASE_DUR + ring * RIPPLE_STEP_DUR, RIPPLE_BASE_DUR, RIPPLE_MAX_DUR)
+    return durToTau(dur)
+  }
+
+  function tick(now: number, ids: string[], srcById: Record<string, string>) {
+    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
+    if (resizing.current || pendingBind.current) return
+
+    const prev = lastT.current || now
+    const dt = clamp((now - prev) / 1000, 0, 0.05)
+    lastT.current = now
+
+    // inertia integrate
+    if (!isDown.current) {
+      const d = Math.exp(-FRICTION * dt)
+      panVel.current.x *= d
+      panVel.current.y *= d
+      if (Math.abs(panVel.current.x) < 10) panVel.current.x = 0
+      if (Math.abs(panVel.current.y) < 10) panVel.current.y = 0
+      panTarget.current.x += panVel.current.x * dt
+      panTarget.current.y += panVel.current.y * dt
+    }
+
+    // panView smoothing
+    {
+      const tau = isDown.current ? PAN_VIEW_TAU_DRAG : PAN_VIEW_TAU_IDLE
+      const a = expAlpha(dt, tau)
+      panView.current.x += (panTarget.current.x - panView.current.x) * a
+      panView.current.y += (panTarget.current.y - panView.current.y) * a
+    }
+
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      wrapIfNeeded(i, ids, srcById)
+
+      const t = tilesRef.current[i]
+      const baseX = t.col * SPAN + panView.current.x
+      const baseY = t.row * SPAN + panView.current.y
+
+      // per-tile follower
+      const tauTile = computeTau(baseX, baseY)
+      const a = expAlpha(dt, tauTile)
+
+      tileViewX.current[i] += (baseX - tileViewX.current[i]) * a
+      tileViewY.current[i] += (baseY - tileViewY.current[i]) * a
+
+      settersRef.current[i]?.setX?.(tileViewX.current[i])
+      settersRef.current[i]?.setY?.(tileViewY.current[i])
+    }
+  }
+
+  // init + resize
   useEffect(() => {
-    let raf = 0;
-    let last = performance.now();
+    if (!manifest) return
+    const root = rootRef.current
+    if (!root) return
 
-    const tick = (t: number) => {
-      const dt = Math.min(0.033, (t - last) / 1000);
-      last = t;
+    const ids = manifest.ids
+    const srcById = manifest.srcById
 
-      if (resizing.current) {
-        raf = requestAnimationFrame(tick);
-        return;
-      }
+    const rebuild = () => {
+      resizing.current = true
+      const r = root.getBoundingClientRect()
+      buildPool(Math.max(1, r.width), Math.max(1, r.height), ids)
 
-      dbg.current.wraps = 0;
-      dbg.current.swaps = 0;
-      dbg.current.maxOff = 0;
+      // ✅ DOM이 실제로 붙은 다음에만 바인딩해야 함 (1~2프레임 뒤)
+      pendingBind.current = true
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          bindSettersAndImages(srcById)
+          pendingBind.current = false
+          resizing.current = false
+          lastT.current = performance.now()
+        })
+      })
+    }
 
-      // inertia
-      if (!dragging.current && inertia.current.active) {
-        const friction = Math.pow(FRICTION_BASE, dt);
-        inertia.current.vx *= friction;
-        inertia.current.vy *= friction;
+    rebuild()
 
-        panTarget.current.x += inertia.current.vx * dt;
-        panTarget.current.y += inertia.current.vy * dt;
+    if (rafId.current) cancelAnimationFrame(rafId.current)
+    lastT.current = performance.now()
+    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
 
-        const speed = Math.hypot(inertia.current.vx, inertia.current.vy);
-        if (speed < INERTIA_STOP_SPEED) {
-          inertia.current.active = false;
-          inertia.current.vx = 0;
-          inertia.current.vy = 0;
-        }
-      }
+    const onDown = (e: PointerEvent) => {
+      if (pointerId.current !== null) return
+      pointerId.current = e.pointerId
+      isDown.current = true
 
-      const desiredX = panTarget.current.x + (dragging.current ? 0 : parallax.current.x);
-      const desiredY = panTarget.current.y + (dragging.current ? 0 : parallax.current.y);
+      lastP.current.x = e.clientX
+      lastP.current.y = e.clientY
+      dragStartPos.current = { x: e.clientX, y: e.clientY }
 
-      if (dragging.current) {
-        view.current.x = desiredX;
-        view.current.y = desiredY;
-      } else {
-        const viewTau = 0.085;
-        const a = 1 - Math.exp(-dt / viewTau);
-        view.current.x += (desiredX - view.current.x) * a;
-        view.current.y += (desiredY - view.current.y) * a;
-      }
+      // 반동/점프 방지: drag 시작 시 velocity reset
+      panVel.current.x = 0
+      panVel.current.y = 0
+    }
 
-      const { w, h } = viewport.current;
-      const cols = poolDims.cols;
-      const rows = poolDims.rows;
-      const cells = pool.current;
-      if (!cols || !rows || !cells.length) {
-        raf = requestAnimationFrame(tick);
-        return;
-      }
+    const onMove = (e: PointerEvent) => {
+      if (!isDown.current) return
+      if (pointerId.current !== e.pointerId) return
 
-      // wrap thresholds (완전히 화면 밖)
-      const minX = -WRAP_MARGIN;
-      const maxX = w + WRAP_MARGIN;
-      const minY = -WRAP_MARGIN;
-      const maxY = h + WRAP_MARGIN;
+      const dx = e.clientX - lastP.current.x
+      const dy = e.clientY - lastP.current.y
+      lastP.current.x = e.clientX
+      lastP.current.y = e.clientY
 
-      const origin = rippleOrigin.current;
-      const mode = rippleMode.current;
-      const ringsThisFrame = new Set<number>();
+      panTarget.current.x += dx
+      panTarget.current.y += dy
 
-      // 1) tile position + wrap + src swap(=wrap된 것만)
-      for (const cell of cells) {
-        if (!cell) continue;
+      // 속도 추정
+      const now = performance.now()
+      const prev = (onMove as any)._prev ?? now
+      const mdt = clamp((now - prev) / 1000, 1e-3, 0.05)
+      ;(onMove as any)._prev = now
 
-        let tx = cell.col * CELL + view.current.x;
-        let ty = cell.row * CELL + view.current.y;
+      panVel.current.x = clamp(dx / mdt, -MAX_VEL, MAX_VEL)
+      panVel.current.y = clamp(dy / mdt, -MAX_VEL, MAX_VEL)
+    }
 
-        let wrapped = false;
+    const onUp = (e: PointerEvent) => {
+      if (pointerId.current !== e.pointerId) return
+      isDown.current = false
+      pointerId.current = null
+    }
 
-        while (tx < minX) {
-          cell.col += cols;
-          tx = cell.col * CELL + view.current.x;
-          wrapped = true;
-        }
-        while (tx > maxX) {
-          cell.col -= cols;
-          tx = cell.col * CELL + view.current.x;
-          wrapped = true;
-        }
-        while (ty < minY) {
-          cell.row += rows;
-          ty = cell.row * CELL + view.current.y;
-          wrapped = true;
-        }
-        while (ty > maxY) {
-          cell.row -= rows;
-          ty = cell.row * CELL + view.current.y;
-          wrapped = true;
-        }
+    const onResize = () => {
+      resizing.current = true
+      if (resizeTimer.current) window.clearTimeout(resizeTimer.current)
+      resizeTimer.current = window.setTimeout(rebuild, 140)
+    }
 
-        if (wrapped) {
-          dbg.current.wraps += 1;
-          cell.mediaKey = ""; // wrap된 경우만 swap 허용
-        }
+    window.addEventListener("pointerdown", onDown, { passive: true })
+    window.addEventListener("pointermove", onMove, { passive: true })
+    window.addEventListener("pointerup", onUp, { passive: true })
+    window.addEventListener("pointercancel", onUp, { passive: true })
+    window.addEventListener("resize", onResize)
 
-        cell.setTX(tx);
-        cell.setTY(ty);
-
-        // media: wrap된 셀만 새 src로 갱신 (화면 안쪽은 절대 바뀌지 않음)
-        if (cell.mediaKey === "") {
-          const mediaIdx = hash2(cell.col, cell.row, mediaList.length);
-          const media = mediaList[mediaIdx];
-          if (media.type === "image") {
-            cell.img.src = media.src;
-            cell.mediaKey = `${mediaIdx}`;
-            dbg.current.swaps += 1;
-          } else {
-            // video는 img-pool로는 안정적으로 못 섞음(다음 단계에서 video pool 분리)
-            // 여기선 그냥 다음 이미지로 대체
-            const fallbackIdx = (mediaIdx + 1) % mediaList.length;
-            cell.img.src = mediaList[fallbackIdx].src;
-            cell.mediaKey = `${fallbackIdx}`;
-            dbg.current.swaps += 1;
-          }
-        }
-
-        if (origin) {
-          cell.ring = manhattanRing(cell.col, cell.row, origin.col, origin.row);
-          ringsThisFrame.add(cell.ring);
-        } else {
-          cell.ring = 0;
-        }
-      }
-
-      // 2) ripple
-      let maxOff = 0;
-
-      if ((mode === "drag" || mode === "settle") && origin) {
-        ringsThisFrame.forEach((ring) => {
-          if (!ringFollow.current.has(ring)) {
-            ringFollow.current.set(ring, { x: view.current.x, y: view.current.y });
-          }
-        });
-
-        ringsThisFrame.forEach((ring) => {
-          const rf = ringFollow.current.get(ring)!;
-
-          const tauRaw =
-            mode === "drag"
-              ? DRAG_BASE_TAU + ring * DRAG_STEP_TAU
-              : SETTLE_BASE_TAU + ring * SETTLE_STEP_TAU;
-
-          const tau =
-            mode === "drag"
-              ? clamp(tauRaw, DRAG_BASE_TAU, DRAG_MAX_TAU)
-              : clamp(tauRaw, SETTLE_BASE_TAU, SETTLE_MAX_TAU);
-
-          const a = 1 - Math.exp(-dt / tau);
-
-          rf.x += (view.current.x - rf.x) * a;
-          rf.y += (view.current.y - rf.y) * a;
-        });
-
-        for (const cell of cells) {
-          if (!cell) continue;
-
-          const rf = ringFollow.current.get(cell.ring);
-          if (!rf) {
-            cell.setMX(0);
-            cell.setMY(0);
-            continue;
-          }
-
-          let rx = (rf.x - view.current.x) * RIPPLE_STRENGTH;
-          let ry = (rf.y - view.current.y) * RIPPLE_STRENGTH;
-
-          rx = clamp(rx, -RIPPLE_MAX_OFFSET, RIPPLE_MAX_OFFSET);
-          ry = clamp(ry, -RIPPLE_MAX_OFFSET, RIPPLE_MAX_OFFSET);
-
-          cell.setMX(rx);
-          cell.setMY(ry);
-
-          const d = Math.hypot(rx, ry);
-          if (d > maxOff) maxOff = d;
-        }
-
-        if (mode === "settle") {
-          if (maxOff < SETTLE_EPS) settleStable.current += 1;
-          else settleStable.current = 0;
-
-          if (settleStable.current >= SETTLE_STABLE_FRAMES) {
-            rippleMode.current = "idle";
-            rippleOrigin.current = null;
-            ringFollow.current.clear();
-            settleStable.current = 0;
-
-            for (const cell of cells) {
-              if (!cell) continue;
-              cell.setMX(0);
-              cell.setMY(0);
-              cell.ring = 0;
-            }
-          }
-        }
-      } else {
-        for (const cell of cells) {
-          if (!cell) continue;
-          cell.setMX(0);
-          cell.setMY(0);
-        }
-      }
-
-      dbg.current.maxOff = maxOff;
-
-      // debug HUD
-      if (DEBUG && dbgSetText.current) {
-        dbgSetText.current(
-          `POOL-WRAP ACTIVE
-drag=${dragging.current ? "1" : "0"} mode=${rippleMode.current}
-view=(${view.current.x.toFixed(1)}, ${view.current.y.toFixed(1)})
-wraps=${dbg.current.wraps} swaps=${dbg.current.swaps}
-maxRippleOffset=${dbg.current.maxOff.toFixed(2)}`
-        );
-      }
-
-      raf = requestAnimationFrame(tick);
-    };
-
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [poolDims.cols, poolDims.rows]);
+    return () => {
+      window.removeEventListener("pointerdown", onDown)
+      window.removeEventListener("pointermove", onMove)
+      window.removeEventListener("pointerup", onUp)
+      window.removeEventListener("pointercancel", onUp)
+      window.removeEventListener("resize", onResize)
+      if (rafId.current) cancelAnimationFrame(rafId.current)
+      rafId.current = null
+      if (resizeTimer.current) window.clearTimeout(resizeTimer.current)
+    }
+  }, [manifest])
 
   return (
     <div
       ref={rootRef}
+      className="relative w-full h-full overflow-hidden bg-black select-none touch-none"
       style={{
-        width: "100vw",
-        height: "100dvh",
-        overflow: "hidden",
-        position: "relative",
-        background: "#0a0a0a",
-        touchAction: "none",
-        cursor: "grab",
+        // 추가 안전장치: 브라우저 기본 드래그/선택 방지
+        userSelect: "none",
+        WebkitUserSelect: "none",
+        WebkitTouchCallout: "none",
       }}
     >
-      {DEBUG && (
-        <div
-          ref={dbgElRef}
-          style={{
-            position: "fixed",
-            left: 12,
-            top: 12,
-            zIndex: 999999,
-            fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-            fontSize: 12,
-            lineHeight: 1.25,
-            color: "#fff",
-            background: "rgba(0,0,0,0.55)",
-            padding: "10px 12px",
-            borderRadius: 10,
-            pointerEvents: "none",
-            whiteSpace: "pre",
-          }}
-        />
-      )}
-
-      {poolNodes}
+      <div className="absolute inset-0">
+        {renderIds.map((i) => (
+          <div
+            key={i}
+            ref={(el) => {
+              if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null }
+              refsRef.current[i].el = el
+            }}
+            className="absolute will-change-transform"
+            style={{ width: TILE, height: TILE }}
+          >
+            <div
+              className="relative w-full h-full"
+              style={{
+                borderRadius: RADIUS,
+                overflow: "hidden",
+                background: "rgba(255,255,255,0.06)",
+              }}
+            >
+              <img
+                ref={(el) => {
+                  if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null }
+                  refsRef.current[i].img = el
+                }}
+                alt=""
+                draggable={false}
+                decoding="async"
+                loading="eager"
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "cover",
+                  display: "block",
+                  borderRadius: RADIUS,
+                  pointerEvents: "none",
+                  userSelect: "none",
+                  opacity: 0,
+                  transition: "opacity 120ms linear",
+                }}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
-  );
+  )
 }
