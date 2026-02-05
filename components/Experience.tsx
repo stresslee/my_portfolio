@@ -1,11 +1,24 @@
 "use client"
 
-import React, { useEffect, useRef, useState } from "react"
+import React, { useEffect, useMemo, useRef, useState } from "react"
 import gsap from "gsap"
 
 type TileModel = { col: number; row: number; id: string }
-type TileRefs = { el: HTMLDivElement | null; img: HTMLImageElement | null }
+type TileRefs = {
+  el: HTMLDivElement | null
+  img: HTMLImageElement | null
+  vid: HTMLVideoElement | null
+  media: HTMLDivElement | null
+  label: HTMLDivElement | null
+}
 type TileSetters = { setX: ((v: number) => void) | null; setY: ((v: number) => void) | null }
+
+type Manifest = {
+  ids: string[]
+  srcById: Record<string, string>
+  metaById?: Record<string, { title?: string; year?: string }>
+  error?: string
+}
 
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v))
 const expAlpha = (dt: number, tau: number) => 1 - Math.exp(-dt / Math.max(1e-6, tau))
@@ -19,6 +32,124 @@ function seed01(a: number, b: number) {
   return (h >>> 0) / 4294967295
 }
 
+function normalizeId(id: string) {
+  let s = (id || "").trim()
+  if (s.includes("/")) s = s.split("/").pop() || s
+  const low = s.toLowerCase()
+  if (low.endsWith(".jpg") || low.endsWith(".png") || low.endsWith(".jpeg") || low.endsWith(".webp")) {
+    s = s.replace(/\.(jpg|png|jpeg|webp)$/i, "")
+  }
+  return s
+}
+
+function prettyTitleFromId(id: string) {
+  return normalizeId(id).replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim()
+}
+
+// -------- Video helpers (Cloudinary) --------
+function isProbablyVideoUrl(url: string) {
+  const u = url.toLowerCase()
+  if (u.includes("/video/upload/")) return true
+  if (u.endsWith(".mp4") || u.endsWith(".webm") || u.endsWith(".mov") || u.endsWith(".m4v")) return true
+  if (u.includes("player.cloudinary.com/embed")) return true
+  return false
+}
+
+function normalizeCloudinaryDeliveryUrl(input: string) {
+  const s = input.trim()
+
+  if (s.includes("res.cloudinary.com") && s.includes("/video/upload/")) {
+    if (s.includes("/video/upload/") && !s.includes("f_auto") && !s.includes("q_auto")) {
+      return s.replace("/video/upload/", "/video/upload/f_auto,q_auto,vc_auto/")
+    }
+    return s
+  }
+
+  if (s.includes("player.cloudinary.com/embed")) {
+    try {
+      const u = new URL(s)
+      const cloud = u.searchParams.get("cloud_name") || ""
+      const pub = u.searchParams.get("public_id") || ""
+      if (!cloud || !pub) return s
+      return `https://res.cloudinary.com/${cloud}/video/upload/f_auto,q_auto,vc_auto/${pub}`
+    } catch {
+      return s
+    }
+  }
+
+  return s
+}
+
+function cloudinaryPosterFromVideoUrl(deliveryUrl: string) {
+  const raw = deliveryUrl.trim()
+  if (!raw.includes("res.cloudinary.com") || !raw.includes("/video/upload/")) return ""
+
+  try {
+    const u = new URL(raw)
+    const base = `${u.protocol}//${u.host}`
+
+    const idx = u.pathname.indexOf("/video/upload/")
+    if (idx < 0) return ""
+
+    const prefix = u.pathname.slice(0, idx)
+    const rest = u.pathname.slice(idx + "/video/upload/".length)
+    const segs = rest.split("/").filter(Boolean)
+
+    const looksLikeTransform = (s: string) =>
+      s.includes(",") ||
+      s.includes("_") ||
+      s.includes(":") ||
+      s.includes("=") ||
+      s.startsWith("c_") ||
+      s.startsWith("w_") ||
+      s.startsWith("h_") ||
+      s.startsWith("q_") ||
+      s.startsWith("f_") ||
+      s.startsWith("vc_") ||
+      s.startsWith("so_")
+
+    let j = 0
+    if (segs[0] && looksLikeTransform(segs[0])) j = 1
+
+    const kept: string[] = []
+    if (segs[j] && /^v\d+$/i.test(segs[j])) {
+      kept.push(segs[j])
+      j += 1
+    }
+
+    const publicParts = segs.slice(j)
+    if (!publicParts.length) return ""
+
+    const last = publicParts[publicParts.length - 1].replace(/\.(mp4|mov|webm|m4v)$/i, "")
+    publicParts[publicParts.length - 1] = last
+
+    const publicPath = publicParts.join("/")
+    const poster = `${base}${prefix}/video/upload/so_0,f_jpg,q_auto,w_520/${kept.length ? kept.join("/") + "/" : ""}${publicPath}.jpg`
+    return poster
+  } catch {
+    const m = raw.match(/^(https?:\/\/res\.cloudinary\.com\/[^/]+)\/video\/upload\/(.*)$/i)
+    if (!m) return ""
+    const base = m[1]
+    let rest = m[2]
+    rest = rest.replace(/^([^/]*[,=_][^/]*)\//, "")
+    rest = rest.replace(/\.(mp4|mov|webm|m4v)(\?.*)?$/i, "")
+    return `${base}/video/upload/so_0,f_jpg,q_auto,w_520/${rest}.jpg`
+  }
+}
+
+// ===== tiny helpers =====
+function hideBrokenImg(img: HTMLImageElement) {
+  img.style.opacity = "0"
+  img.style.visibility = "hidden"
+  img.style.display = "none"
+  img.removeAttribute("src")
+}
+function prepareImgForNewSrc(img: HTMLImageElement) {
+  img.style.display = "block"
+  img.style.visibility = "visible"
+  img.style.opacity = "0"
+}
+
 export default function Experience() {
   // ===== Layout =====
   const TILE = 130
@@ -27,7 +158,7 @@ export default function Experience() {
   const RADIUS = 6
   const WRAP_MARGIN = 2
 
-  // ===== Inertia (약 0.5초 감각) =====
+  // ===== Inertia =====
   const FRICTION = 13.5
   const MAX_VEL = 5200
 
@@ -35,31 +166,59 @@ export default function Experience() {
   const PAN_VIEW_TAU_DRAG = 0.14
   const PAN_VIEW_TAU_IDLE = 0.08
 
-  // ===== Ripple timing (Framer-like) =====
+  // ===== Ripple timing (drag follower) =====
   const RIPPLE_BASE_DUR = 0.5
   const RIPPLE_STEP_DUR = 0.3
   const RIPPLE_MAX_DUR = 3.2
-  const RIPPLE_MAX_RING = 10
-
-  // 🔥 2배 빠르게: tau 절반
   const durToTau = (dur: number) => dur / 6
 
+  // ===== Parallax =====
+  const PARALLAX_STRENGTH = 50
+  const PARALLAX_TAU = 0.1
+
+  // ===== easing =====
+  const EASE_OUT_QUINT = "cubic-bezier(0.22,1,0.36,1)"
+  const EASE_OUT_QUAD = "cubic-bezier(0.25,0.46,0.45,0.94)"
+
+  // ===== Video performance knobs =====
+  const MAX_ACTIVE_VIDEOS = 6
+  const VIDEO_VIS_MARGIN = 120
+  const VIDEO_MIN_WATCH_MS = 180
+
+  // ===== INTRO (유지) =====
+  const INTRO_DUR = 0.6
+  const INTRO_DELAY_STEP = 0.015
+  const INTRO_PULL_PX = 120
+  const INTRO_SCALE_MIN = 0.7
+  const INTRO_SPRING = { stiffness: 700, damping: 84, mass: 10 }
+
+  // ✅ intro 시작 후 N초 지나면 강제 드래그 가능
+  const INTRO_DRAG_ENABLE_AFTER = 1.0
+
+  // ✅ left panel gate
+  const introGateReady = useRef(false)
+
+  // ✅ fallback: 이벤트 못받아도 1초 후 강제 시작
+  const INTRO_FORCE_START_MS = 1000
+  const introForceTimer = useRef<number | null>(null)
+
   // ===== manifest =====
-  const [manifest, setManifest] = useState<{ ids: string[]; srcById: Record<string, string>; error?: string } | null>(
-    null
-  )
+  const [manifest, setManifest] = useState<Manifest | null>(null)
+
   useEffect(() => {
     let alive = true
     fetch("/api/pf-manifest", { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => alive && setManifest(j))
-      .catch((e) => alive && setManifest({ ids: [], srcById: {}, error: String(e) }))
+      .catch(() => alive && setManifest({ ids: [], srcById: {}, error: "manifest fetch failed" }))
     return () => {
       alive = false
     }
   }, [])
 
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const gridLayerRef = useRef<HTMLDivElement | null>(null)
+
   const [renderIds, setRenderIds] = useState<number[]>([])
 
   const tilesRef = useRef<TileModel[]>([])
@@ -67,41 +226,101 @@ export default function Experience() {
   const settersRef = useRef<TileSetters[]>([])
   const lastIdByTile = useRef<string[]>([])
 
-  // coord -> id (인접 중복 최소화용)
   const coordIdRef = useRef<Map<string, string>>(new Map())
 
-  // viewport/pool
   const viewW = useRef(0)
   const viewH = useRef(0)
   const poolCols = useRef(0)
   const poolRows = useRef(0)
 
-  // RAF
   const rafId = useRef<number | null>(null)
   const lastT = useRef(0)
   const resizing = useRef(false)
   const pendingBind = useRef(false)
   const resizeTimer = useRef<number | null>(null)
 
-  // world motion
   const panTarget = useRef({ x: 0, y: 0 })
   const panView = useRef({ x: 0, y: 0 })
   const panVel = useRef({ x: 0, y: 0 })
 
-  // per-tile follower (Framer tileX/tileY)
+  const parallaxTarget = useRef({ x: 0, y: 0 })
+  const parallaxView = useRef({ x: 0, y: 0 })
+
   const tileViewX = useRef<number[]>([])
   const tileViewY = useRef<number[]>([])
 
-  // input
   const isDown = useRef(false)
   const pointerId = useRef<number | null>(null)
   const lastP = useRef({ x: 0, y: 0 })
   const dragStartPos = useRef<{ x: number; y: number } | null>(null)
 
+  // ---- video runtime state
+  const tileIsVideo = useRef<boolean[]>([])
+  const tileVideoUrl = useRef<string[]>([])
+  const tilePosterUrl = useRef<string[]>([])
+  const tileVideoLastWantedAt = useRef<number[]>([])
+  const activeVideoSet = useRef<Set<number>>(new Set())
+
+  // ===== intro physics state =====
+  const introRan = useRef(false)
+  const introActive = useRef(true)
+
+  const introStartMs = useRef<number>(0)
+  const introDelaySec = useRef<number[]>([])
+  const introBase = useRef<Array<{ x: number; y: number }>>([])
+  const introPos = useRef<Array<{ x: number; y: number }>>([])
+  const introVel = useRef<Array<{ vx: number; vy: number }>>([])
+  const introScale = useRef<number[]>([])
+  const introScaleV = useRef<number[]>([])
+  const introOpacity = useRef<number[]>([])
+
+  // ✅ spring dt용
+  const introPrevStepMs = useRef<number>(0)
+
+  const gridCursor = useMemo(() => {
+    if (isDown.current) return "grabbing"
+    return "grab"
+  }, [])
+
+  // ✅ left panel 완료 이벤트
+  useEffect(() => {
+    const onDone = () => {
+      introGateReady.current = true
+      if (manifest && !introRan.current) runIntroOnce()
+    }
+
+    window.addEventListener("pf:leftIntroDone", onDone as any)
+    window.addEventListener("pf_left_panel_done", onDone as any)
+
+    introForceTimer.current = window.setTimeout(() => {
+      introGateReady.current = true
+      if (manifest && !introRan.current) runIntroOnce()
+    }, INTRO_FORCE_START_MS) as any
+
+    return () => {
+      window.removeEventListener("pf:leftIntroDone", onDone as any)
+      window.removeEventListener("pf_left_panel_done", onDone as any)
+      if (introForceTimer.current) window.clearTimeout(introForceTimer.current)
+      introForceTimer.current = null
+    }
+  }, [manifest])
+
   function ensureArrays(n: number) {
     if (tileViewX.current.length !== n) tileViewX.current = new Array(n).fill(0)
     if (tileViewY.current.length !== n) tileViewY.current = new Array(n).fill(0)
     if (lastIdByTile.current.length !== n) lastIdByTile.current = new Array(n).fill("")
+    if (tileIsVideo.current.length !== n) tileIsVideo.current = new Array(n).fill(false)
+    if (tileVideoUrl.current.length !== n) tileVideoUrl.current = new Array(n).fill("")
+    if (tilePosterUrl.current.length !== n) tilePosterUrl.current = new Array(n).fill("")
+    if (tileVideoLastWantedAt.current.length !== n) tileVideoLastWantedAt.current = new Array(n).fill(0)
+
+    if (introDelaySec.current.length !== n) introDelaySec.current = new Array(n).fill(0)
+    if (introBase.current.length !== n) introBase.current = new Array(n).fill(0).map(() => ({ x: 0, y: 0 }))
+    if (introPos.current.length !== n) introPos.current = new Array(n).fill(0).map(() => ({ x: 0, y: 0 }))
+    if (introVel.current.length !== n) introVel.current = new Array(n).fill(0).map(() => ({ vx: 0, vy: 0 }))
+    if (introScale.current.length !== n) introScale.current = new Array(n).fill(1)
+    if (introScaleV.current.length !== n) introScaleV.current = new Array(n).fill(0)
+    if (introOpacity.current.length !== n) introOpacity.current = new Array(n).fill(0)
   }
 
   function pickIdNoAdjRepeat(col: number, row: number, ids: string[]) {
@@ -118,24 +337,87 @@ export default function Experience() {
     return ids[idx]
   }
 
-  function applyTileImage(i: number, srcById: Record<string, string>) {
+  function stopVideo(i: number) {
+    const vid = refsRef.current[i]?.vid
+    if (!vid) return
+    try {
+      vid.pause()
+      vid.removeAttribute("src")
+      vid.load()
+      vid.style.opacity = "0"
+      vid.style.display = "none"
+    } catch {}
+  }
+
+  // ✅ hover 텍스트 채우기 (manifest meta 우선, 없으면 fallback)
+  function setHoverLabel(i: number, rawId: string) {
+    const label = refsRef.current[i]?.label
+    if (!label) return
+
+    const nid = normalizeId(rawId)
+    const meta = manifest?.metaById?.[nid] || manifest?.metaById?.[nid.toLowerCase()]
+    const title = (meta?.title && meta.title.trim()) || prettyTitleFromId(rawId)
+    const year = (meta?.year && String(meta.year).trim()) || "—"
+
+    label.innerHTML = `
+      <div class="pf-h-title">${title}</div>
+      <div class="pf-h-year">${year}</div>
+    `
+  }
+
+  function applyTileMedia(i: number, srcById: Record<string, string>) {
+    const el = refsRef.current[i]?.el
     const img = refsRef.current[i]?.img
-    if (!img) return
+    const vid = refsRef.current[i]?.vid
+    if (!el || !img || !vid) return
 
-    const id = tilesRef.current[i].id
-    if (lastIdByTile.current[i] === id) return
-    lastIdByTile.current[i] = id
+    const rawId = tilesRef.current[i].id
+    if (lastIdByTile.current[i] === rawId) return
+    lastIdByTile.current[i] = rawId
 
-    const src = srcById[id]
-    if (!src) {
-      img.removeAttribute("src")
-      img.style.opacity = "0"
+    el.dataset.pfId = normalizeId(rawId)
+
+    // ✅ label 채우기
+    setHoverLabel(i, rawId)
+
+    const src0 = srcById[rawId] ?? srcById[normalizeId(rawId)] ?? srcById[normalizeId(rawId).toLowerCase()]
+    if (!src0) {
+      hideBrokenImg(img)
+      tileIsVideo.current[i] = false
+      tileVideoUrl.current[i] = ""
+      tilePosterUrl.current[i] = ""
+      el.dataset.isVideo = "0"
+      stopVideo(i)
       return
     }
 
-    // assign
-    if (img.src !== src) img.src = src
-    img.style.opacity = "1"
+    const src = normalizeCloudinaryDeliveryUrl(src0)
+    const isVid = isProbablyVideoUrl(src)
+
+    tileIsVideo.current[i] = isVid
+    tileVideoUrl.current[i] = isVid ? src : ""
+    el.dataset.isVideo = isVid ? "1" : "0"
+
+    if (!isVid) {
+      tilePosterUrl.current[i] = ""
+      stopVideo(i)
+
+      prepareImgForNewSrc(img)
+      if (img.getAttribute("src") !== src) img.setAttribute("src", src)
+      return
+    }
+
+    const poster = cloudinaryPosterFromVideoUrl(src)
+    tilePosterUrl.current[i] = poster || ""
+
+    if (poster) {
+      prepareImgForNewSrc(img)
+      if (img.getAttribute("src") !== poster) img.setAttribute("src", poster)
+    } else {
+      hideBrokenImg(img)
+    }
+
+    stopVideo(i)
   }
 
   function buildPool(vw: number, vh: number, ids: string[]) {
@@ -164,9 +446,16 @@ export default function Experience() {
         map.set(keyOf(col, row), id)
 
         tiles.push({ col, row, id })
-        refs.push({ el: null, img: null })
+        refs.push({ el: null, img: null, vid: null, media: null, label: null })
         setters.push({ setX: null, setY: null })
       }
+    }
+
+    const heroIdx = tiles.findIndex((t) => t.col === 0 && t.row === 0)
+    if (heroIdx > 0) {
+      const tmp = tiles[0]
+      tiles[0] = tiles[heroIdx]
+      tiles[heroIdx] = tmp
     }
 
     tilesRef.current = tiles
@@ -175,7 +464,6 @@ export default function Experience() {
 
     ensureArrays(tiles.length)
 
-    // 초기 표시 위치를 base로 맞춤 (초기 튐 방지)
     for (let i = 0; i < tiles.length; i++) {
       tileViewX.current[i] = tiles[i].col * SPAN + panView.current.x
       tileViewY.current[i] = tiles[i].row * SPAN + panView.current.y
@@ -184,17 +472,37 @@ export default function Experience() {
     setRenderIds(Array.from({ length: tiles.length }, (_, i) => i))
   }
 
-  function bindSettersAndImages(srcById: Record<string, string>) {
+  function bindSettersAndMedia(srcById: Record<string, string>) {
+    const WRAP_H = TILE + 70
+    const originY = (TILE * 0.5) / WRAP_H
+    const originStr = `50% ${Math.round(originY * 1000) / 10}%`
+
     for (let i = 0; i < refsRef.current.length; i++) {
       const el = refsRef.current[i]?.el
       const img = refsRef.current[i]?.img
-      if (!el || !img) continue
+      const vid = refsRef.current[i]?.vid
+      if (!el || !img || !vid) continue
 
-      gsap.set(el, { x: 0, y: 0, force3D: true })
+      gsap.set(el, { x: 0, y: 0, force3D: true, transformOrigin: originStr })
       settersRef.current[i].setX = gsap.quickSetter(el, "x", "px") as any
       settersRef.current[i].setY = gsap.quickSetter(el, "y", "px") as any
 
-      applyTileImage(i, srcById)
+      gsap.set(el, { opacity: 0, scale: 1 })
+
+      img.onload = () => {
+        img.style.display = "block"
+        img.style.visibility = "visible"
+        img.style.opacity = "1"
+      }
+      img.onerror = () => {
+        hideBrokenImg(img)
+      }
+
+      vid.onerror = () => {
+        stopVideo(i)
+      }
+
+      applyTileMedia(i, srcById)
     }
   }
 
@@ -203,7 +511,6 @@ export default function Experience() {
     const vw = viewW.current
     const vh = viewH.current
 
-    // base 기준으로 밖으로 나갔는지 판단
     const bx = t.col * SPAN + panView.current.x
     const by = t.row * SPAN + panView.current.y
 
@@ -232,16 +539,14 @@ export default function Experience() {
     }
 
     if (moved) {
-      // 화면 밖에서만 콘텐츠 교체
       const map = coordIdRef.current
       map.delete(keyOf(oc, or))
 
       t.id = pickIdNoAdjRepeat(t.col, t.row, ids)
       map.set(keyOf(t.col, t.row), t.id)
 
-      applyTileImage(i, srcById)
+      applyTileMedia(i, srcById)
 
-      // wrap 순간 표시 좌표도 base로 보정 (겹침/튐 방지)
       tileViewX.current[i] = t.col * SPAN + panView.current.x
       tileViewY.current[i] = t.row * SPAN + panView.current.y
     }
@@ -254,48 +559,341 @@ export default function Experience() {
     const cx = baseX + TILE * 0.5
     const cy = baseY + TILE * 0.5
     const dist = Math.hypot(cx - ds.x, cy - ds.y)
-    const ring = clamp(Math.floor(dist / SPAN), 0, RIPPLE_MAX_RING)
+    const ring = clamp(Math.floor(dist / SPAN), 0, 10)
     const dur = clamp(RIPPLE_BASE_DUR + ring * RIPPLE_STEP_DUR, RIPPLE_BASE_DUR, RIPPLE_MAX_DUR)
     return durToTau(dur)
+  }
+
+  function updateVideosForViewport(nowMs: number) {
+    if (introActive.current) return
+
+    const vw = viewW.current || window.innerWidth
+    const vh = viewH.current || window.innerHeight
+    const cx = vw * 0.5
+    const cy = vh * 0.5
+
+    const candidates: { i: number; d2: number }[] = []
+
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      if (!tileIsVideo.current[i]) continue
+      const x = tileViewX.current[i]
+      const y = tileViewY.current[i]
+
+      const inX = x + TILE > -VIDEO_VIS_MARGIN && x < vw + VIDEO_VIS_MARGIN
+      const inY = y + TILE > -VIDEO_VIS_MARGIN && y < vh + VIDEO_VIS_MARGIN
+      if (!inX || !inY) continue
+
+      const tcx = x + TILE * 0.5
+      const tcy = y + TILE * 0.5
+      const dx = tcx - cx
+      const dy = tcy - cy
+      candidates.push({ i, d2: dx * dx + dy * dy })
+    }
+
+    candidates.sort((a, b) => a.d2 - b.d2)
+    const want = new Set<number>(candidates.slice(0, MAX_ACTIVE_VIDEOS).map((c) => c.i))
+
+    want.forEach((i) => (tileVideoLastWantedAt.current[i] = nowMs))
+
+    activeVideoSet.current.forEach((i) => {
+      if (want.has(i)) return
+      const lastWanted = tileVideoLastWantedAt.current[i] || 0
+      if (nowMs - lastWanted < VIDEO_MIN_WATCH_MS) return
+      stopVideo(i)
+      activeVideoSet.current.delete(i)
+    })
+
+    want.forEach((i) => {
+      if (activeVideoSet.current.has(i)) return
+      const vid = refsRef.current[i]?.vid
+      const url = tileVideoUrl.current[i]
+      if (!vid || !url) return
+
+      if (vid.getAttribute("src") !== url) {
+        vid.setAttribute("src", url)
+        try {
+          vid.load()
+        } catch {}
+      }
+
+      vid.style.display = "block"
+      vid.style.opacity = "0"
+
+      const p = vid.play()
+      if (p && typeof (p as any).catch === "function") {
+        ;(p as any).catch(() => stopVideo(i))
+      }
+
+      requestAnimationFrame(() => {
+        vid.style.opacity = "1"
+      })
+
+      activeVideoSet.current.add(i)
+    })
+  }
+
+  // ============================
+  // INTRO (distance 기반 delay + spring physics)
+  // ============================
+  function runIntroOnce() {
+    if (introRan.current) return
+    introRan.current = true
+    introActive.current = true
+
+    const vw = Math.max(1, viewW.current || window.innerWidth)
+    const vh = Math.max(1, viewH.current || window.innerHeight)
+    if (!tilesRef.current.length) {
+      introActive.current = false
+      return
+    }
+
+    const hero = tilesRef.current[0]
+    const heroWorldCx = hero.col * SPAN + TILE * 0.5
+    const heroWorldCy = hero.row * SPAN + TILE * 0.5
+    const panX = vw * 0.5 - heroWorldCx
+    const panY = vh * 0.5 - heroWorldCy
+
+    panTarget.current.x = panX
+    panTarget.current.y = panY
+    panView.current.x = panX
+    panView.current.y = panY
+
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      const t = tilesRef.current[i]
+      const baseX = t.col * SPAN + panView.current.x
+      const baseY = t.row * SPAN + panView.current.y
+      tileViewX.current[i] = baseX
+      tileViewY.current[i] = baseY
+      introBase.current[i].x = baseX
+      introBase.current[i].y = baseY
+    }
+
+    const order = Array.from({ length: tilesRef.current.length }, (_, i) => i)
+      .filter((i) => i !== 0)
+      .map((i) => {
+        const t = tilesRef.current[i]
+        const dx = t.col - hero.col
+        const dy = t.row - hero.row
+        const dist = Math.hypot(dx, dy)
+        const ang = Math.atan2(dy, dx)
+        return { i, dist, ang }
+      })
+      .sort((a, b) => {
+        if (a.dist !== b.dist) return a.dist - b.dist
+        return a.ang - b.ang
+      })
+      .map((o) => o.i)
+
+    introDelaySec.current.fill(0)
+    for (let k = 0; k < order.length; k++) {
+      introDelaySec.current[order[k]] = (k + 1) * INTRO_DELAY_STEP
+    }
+    introDelaySec.current[0] = 0
+
+    introStartMs.current = performance.now()
+    introPrevStepMs.current = introStartMs.current
+
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      const baseX = introBase.current[i].x
+      const baseY = introBase.current[i].y
+
+      const centerX = vw * 0.5
+      const centerY = vh * 0.5
+
+      const cx = baseX + TILE * 0.5
+      const cy = baseY + TILE * 0.5
+      const vx = centerX - cx
+      const vy = centerY - cy
+      const d = Math.hypot(vx, vy) || 1
+      const ux = vx / d
+      const uy = vy / d
+
+      const pull = i === 0 ? 0 : INTRO_PULL_PX
+
+      introPos.current[i].x = baseX + ux * pull
+      introPos.current[i].y = baseY + uy * pull
+      introVel.current[i].vx = 0
+      introVel.current[i].vy = 0
+
+      introScale.current[i] = 1
+      introScaleV.current[i] = 0
+      introOpacity.current[i] = 0
+    }
+
+    for (let i = 0; i < refsRef.current.length; i++) {
+      const el = refsRef.current[i]?.el
+      if (!el) continue
+      gsap.set(el, { opacity: 0, scale: 1 })
+    }
+  }
+
+  function stepSpring1D(x: number, v: number, target: number, dt: number, k: number, c: number, m: number) {
+    const a = (-k * (x - target) - c * v) / m
+    const v2 = v + a * dt
+    const x2 = x + v2 * dt
+    return [x2, v2] as const
+  }
+
+  function finishIntroImmediately() {
+    introActive.current = false
+    // base로 스냅 + opacity/scale 정상화
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      tileViewX.current[i] = introBase.current[i].x
+      tileViewY.current[i] = introBase.current[i].y
+      introOpacity.current[i] = 1
+      introScale.current[i] = 1
+      introScaleV.current[i] = 0
+      introVel.current[i].vx = 0
+      introVel.current[i].vy = 0
+      const el = refsRef.current[i]?.el
+      if (el) gsap.set(el, { opacity: 1, scale: 1 })
+    }
+  }
+
+  function stepIntro(now: number) {
+    const prevMs = introPrevStepMs.current || now
+    const dt = clamp((now - prevMs) / 1000, 0.001, 0.033)
+    introPrevStepMs.current = now
+
+    const t = (now - introStartMs.current) / 1000
+    const n = tilesRef.current.length
+    if (n <= 0) {
+      introActive.current = false
+      return
+    }
+
+    const k = INTRO_SPRING.stiffness
+    const c = INTRO_SPRING.damping
+    const m = INTRO_SPRING.mass
+
+    let allDone = true
+
+    for (let i = 0; i < n; i++) {
+      const delay = introDelaySec.current[i] || 0
+      if (t < delay) {
+        allDone = false
+        continue
+      }
+
+      const lt = t - delay
+      introOpacity.current[i] = clamp(lt / INTRO_DUR, 0, 1)
+
+      // position spring
+      {
+        const baseX = introBase.current[i].x
+        const baseY = introBase.current[i].y
+
+        const px = introPos.current[i].x
+        const py = introPos.current[i].y
+        const vx = introVel.current[i].vx
+        const vy = introVel.current[i].vy
+
+        const [nx, nvx] = stepSpring1D(px, vx, baseX, dt, k, c, m)
+        const [ny, nvy] = stepSpring1D(py, vy, baseY, dt, k, c, m)
+
+        introPos.current[i].x = nx
+        introPos.current[i].y = ny
+        introVel.current[i].vx = nvx
+        introVel.current[i].vy = nvy
+
+        tileViewX.current[i] = nx
+        tileViewY.current[i] = ny
+
+        const posErr = Math.hypot(nx - baseX, ny - baseY)
+        const velMag = Math.hypot(nvx, nvy)
+        if (posErr > 0.6 || velMag > 2.0) allDone = false
+      }
+
+      // scale spring (1 -> min -> 1)
+      {
+        const s = introScale.current[i]
+        const sv = introScaleV.current[i]
+
+        const half = INTRO_DUR * 0.5
+        const target = lt < half ? INTRO_SCALE_MIN : 1
+
+        const [ns, nsv] = stepSpring1D(s, sv, target, dt, k, c, m)
+        introScale.current[i] = ns
+        introScaleV.current[i] = nsv
+
+        const err = Math.abs(ns - target)
+        const vmag = Math.abs(nsv)
+        if (lt < INTRO_DUR + 0.25 || err > 0.004 || vmag > 0.01) allDone = false
+      }
+    }
+
+    if (allDone) introActive.current = false
+
+    for (let i = 0; i < n; i++) {
+      const el = refsRef.current[i]?.el
+      if (!el) continue
+      gsap.set(el, { opacity: introOpacity.current[i], scale: introScale.current[i] })
+    }
   }
 
   function tick(now: number, ids: string[], srcById: Record<string, string>) {
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
     if (resizing.current || pendingBind.current) return
 
+    if (!introGateReady.current) {
+      for (let i = 0; i < tilesRef.current.length; i++) {
+        settersRef.current[i]?.setX?.(tileViewX.current[i])
+        settersRef.current[i]?.setY?.(tileViewY.current[i])
+      }
+      return
+    }
+
+    if (!introRan.current) runIntroOnce()
+
+    if (introActive.current) {
+      stepIntro(now)
+      for (let i = 0; i < tilesRef.current.length; i++) {
+        settersRef.current[i]?.setX?.(tileViewX.current[i])
+        settersRef.current[i]?.setY?.(tileViewY.current[i])
+      }
+      return
+    }
+
     const prev = lastT.current || now
-    const dt = clamp((now - prev) / 1000, 0, 0.05)
+    const frameDt = clamp((now - prev) / 1000, 0, 0.05)
     lastT.current = now
 
-    // inertia integrate
     if (!isDown.current) {
-      const d = Math.exp(-FRICTION * dt)
+      const d = Math.exp(-FRICTION * frameDt)
       panVel.current.x *= d
       panVel.current.y *= d
       if (Math.abs(panVel.current.x) < 10) panVel.current.x = 0
       if (Math.abs(panVel.current.y) < 10) panVel.current.y = 0
-      panTarget.current.x += panVel.current.x * dt
-      panTarget.current.y += panVel.current.y * dt
+      panTarget.current.x += panVel.current.x * frameDt
+      panTarget.current.y += panVel.current.y * frameDt
     }
 
-    // panView smoothing
     {
+      const a = expAlpha(frameDt, PARALLAX_TAU)
+      const tx = isDown.current ? 0 : parallaxTarget.current.x
+      const ty = isDown.current ? 0 : parallaxTarget.current.y
+      parallaxView.current.x += (tx - parallaxView.current.x) * a
+      parallaxView.current.y += (ty - parallaxView.current.y) * a
+    }
+
+    {
+      const desiredX = panTarget.current.x + parallaxView.current.x
+      const desiredY = panTarget.current.y + parallaxView.current.y
       const tau = isDown.current ? PAN_VIEW_TAU_DRAG : PAN_VIEW_TAU_IDLE
-      const a = expAlpha(dt, tau)
-      panView.current.x += (panTarget.current.x - panView.current.x) * a
-      panView.current.y += (panTarget.current.y - panView.current.y) * a
+      const a = expAlpha(frameDt, tau)
+      panView.current.x += (desiredX - panView.current.x) * a
+      panView.current.y += (desiredY - panView.current.y) * a
     }
 
     for (let i = 0; i < tilesRef.current.length; i++) {
       wrapIfNeeded(i, ids, srcById)
 
-      const t = tilesRef.current[i]
-      const baseX = t.col * SPAN + panView.current.x
-      const baseY = t.row * SPAN + panView.current.y
+      const tt = tilesRef.current[i]
+      const baseX = tt.col * SPAN + panView.current.x
+      const baseY = tt.row * SPAN + panView.current.y
 
-      // per-tile follower
       const tauTile = computeTau(baseX, baseY)
-      const a = expAlpha(dt, tauTile)
+      const a = expAlpha(frameDt, tauTile)
 
       tileViewX.current[i] += (baseX - tileViewX.current[i]) * a
       tileViewY.current[i] += (baseY - tileViewY.current[i]) * a
@@ -303,9 +901,10 @@ export default function Experience() {
       settersRef.current[i]?.setX?.(tileViewX.current[i])
       settersRef.current[i]?.setY?.(tileViewY.current[i])
     }
+
+    updateVideosForViewport(now)
   }
 
-  // init + resize
   useEffect(() => {
     if (!manifest) return
     const root = rootRef.current
@@ -319,11 +918,10 @@ export default function Experience() {
       const r = root.getBoundingClientRect()
       buildPool(Math.max(1, r.width), Math.max(1, r.height), ids)
 
-      // ✅ DOM이 실제로 붙은 다음에만 바인딩해야 함 (1~2프레임 뒤)
       pendingBind.current = true
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          bindSettersAndImages(srcById)
+          bindSettersAndMedia(srcById)
           pendingBind.current = false
           resizing.current = false
           lastT.current = performance.now()
@@ -337,8 +935,22 @@ export default function Experience() {
     lastT.current = performance.now()
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
 
+    const canDragNow = () => {
+      if (!introGateReady.current) return false
+      if (!introRan.current) return false
+      if (!introActive.current) return true
+      const elapsed = (performance.now() - introStartMs.current) / 1000
+      return elapsed >= INTRO_DRAG_ENABLE_AFTER
+    }
+
     const onDown = (e: PointerEvent) => {
+      if (!canDragNow()) return
       if (pointerId.current !== null) return
+
+      // ✅ intro 진행 중이더라도 1초 이후면 드래그 시작 가능
+      // 충돌 방지: 드래그 시작 순간 intro 즉시 종료
+      if (introActive.current) finishIntroImmediately()
+
       pointerId.current = e.pointerId
       isDown.current = true
 
@@ -346,7 +958,6 @@ export default function Experience() {
       lastP.current.y = e.clientY
       dragStartPos.current = { x: e.clientX, y: e.clientY }
 
-      // 반동/점프 방지: drag 시작 시 velocity reset
       panVel.current.x = 0
       panVel.current.y = 0
     }
@@ -363,7 +974,6 @@ export default function Experience() {
       panTarget.current.x += dx
       panTarget.current.y += dy
 
-      // 속도 추정
       const now = performance.now()
       const prev = (onMove as any)._prev ?? now
       const mdt = clamp((now - prev) / 1000, 1e-3, 0.05)
@@ -400,63 +1010,179 @@ export default function Experience() {
       if (rafId.current) cancelAnimationFrame(rafId.current)
       rafId.current = null
       if (resizeTimer.current) window.clearTimeout(resizeTimer.current)
+
+      activeVideoSet.current.forEach((idx) => stopVideo(idx))
+      activeVideoSet.current.clear()
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manifest])
+
+  // mouse parallax
+  useEffect(() => {
+    let raf: number | null = null
+    let mx = 0
+    let my = 0
+
+    const onMove = (e: MouseEvent) => {
+      mx = e.clientX
+      my = e.clientY
+      if (raf) return
+      raf = requestAnimationFrame(() => {
+        raf = null
+        if (introActive.current || !introGateReady.current) return
+
+        const vw = Math.max(1, viewW.current || window.innerWidth)
+        const vh = Math.max(1, viewH.current || window.innerHeight)
+        const cx = vw / 2
+        const cy = vh / 2
+        const nx = (mx - cx) / cx
+        const ny = (my - cy) / cy
+
+        parallaxTarget.current.x = -nx * PARALLAX_STRENGTH
+        parallaxTarget.current.y = -ny * PARALLAX_STRENGTH
+      })
+    }
+
+    window.addEventListener("mousemove", onMove, { passive: true })
+    return () => {
+      window.removeEventListener("mousemove", onMove)
+      if (raf) cancelAnimationFrame(raf)
+    }
+  }, [])
 
   return (
     <div
       ref={rootRef}
       className="relative w-full h-full overflow-hidden bg-black select-none touch-none"
       style={{
-        // 추가 안전장치: 브라우저 기본 드래그/선택 방지
         userSelect: "none",
         WebkitUserSelect: "none",
         WebkitTouchCallout: "none",
+        cursor: isDown.current ? "grabbing" : gridCursor,
       }}
     >
-      <div className="absolute inset-0">
-        {renderIds.map((i) => (
-          <div
-            key={i}
-            ref={(el) => {
-              if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null }
-              refsRef.current[i].el = el
-            }}
-            className="absolute will-change-transform"
-            style={{ width: TILE, height: TILE }}
-          >
+      <style>{`
+        .pf-tile:hover { z-index: 9999; }
+
+        .pf-media { transform: scale(1); transition: transform 600ms ${EASE_OUT_QUINT}; will-change: transform; }
+        .pf-tile:hover .pf-media { transform: scale(1.3); }
+
+        /* ✅ hover label: 내용 보이게 + 아래로 충분히 */
+        .pf-hover {
+          position:absolute;
+          left:50%;
+          top:${TILE + 30}px;
+          transform:translateX(-50%) translateY(12px);
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          gap:6px;
+          width:max-content;
+          white-space:nowrap;
+          overflow:visible;
+          text-overflow:clip;
+          pointer-events:none;
+          user-select:none;
+          opacity:0;
+          transition:opacity 260ms linear, transform 260ms ${EASE_OUT_QUINT};
+          z-index: 50;
+        }
+        .pf-tile:hover .pf-hover {
+          opacity:1;
+          transform:translateX(-50%) translateY(0);
+        }
+        .pf-h-title { font-size:14px; line-height:1.2; color:rgba(255,255,255,0.92); font-weight:500; }
+        .pf-h-year { font-size:12px; line-height:1.2; color:rgba(255,255,255,0.75); font-weight:400; }
+      `}</style>
+
+      <div ref={gridLayerRef} className="absolute inset-0" style={{ filter: "blur(0px)", willChange: "filter" }}>
+        <div className="absolute inset-0">
+          {renderIds.map((i) => (
             <div
-              className="relative w-full h-full"
-              style={{
-                borderRadius: RADIUS,
-                overflow: "hidden",
-                background: "rgba(255,255,255,0.06)",
+              key={i}
+              ref={(el) => {
+                if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null, vid: null, media: null, label: null }
+                refsRef.current[i].el = el
               }}
+              className="absolute will-change-transform pf-tile"
+              style={{ width: TILE, height: TILE + 70, opacity: 0 }}
             >
-              <img
+              <div
                 ref={(el) => {
-                  if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null }
-                  refsRef.current[i].img = el
+                  if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null, vid: null, media: null, label: null }
+                  refsRef.current[i].media = el
                 }}
-                alt=""
-                draggable={false}
-                decoding="async"
-                loading="eager"
+                className="relative w-full pf-media"
                 style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "cover",
-                  display: "block",
+                  width: TILE,
+                  height: TILE,
                   borderRadius: RADIUS,
-                  pointerEvents: "none",
-                  userSelect: "none",
-                  opacity: 0,
-                  transition: "opacity 120ms linear",
+                  overflow: "hidden",
+                  background: "rgba(255,255,255,0.07)",
+                  boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
                 }}
+              >
+                <img
+                  ref={(el) => {
+                    if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null, vid: null, media: null, label: null }
+                    refsRef.current[i].img = el
+                  }}
+                  alt=""
+                  draggable={false}
+                  decoding="async"
+                  loading="eager"
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    display: "block",
+                    borderRadius: RADIUS,
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    opacity: 0,
+                    visibility: "visible",
+                    zIndex: 2,
+                  }}
+                />
+
+                <video
+                  ref={(el) => {
+                    if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null, vid: null, media: null, label: null }
+                    refsRef.current[i].vid = el
+                  }}
+                  muted
+                  playsInline
+                  loop
+                  preload="none"
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    width: "100%",
+                    height: "100%",
+                    objectFit: "cover",
+                    display: "none",
+                    opacity: 0,
+                    transition: "opacity 140ms linear",
+                    borderRadius: RADIUS,
+                    pointerEvents: "none",
+                    userSelect: "none",
+                    zIndex: 3,
+                  }}
+                />
+              </div>
+
+              <div
+                ref={(el) => {
+                  if (!refsRef.current[i]) refsRef.current[i] = { el: null, img: null, vid: null, media: null, label: null }
+                  refsRef.current[i].label = el
+                }}
+                className="pf-hover"
               />
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
     </div>
   )

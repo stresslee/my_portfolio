@@ -1,26 +1,84 @@
-"use client";
+"use client"
 
-import React from "react";
+import React, { useEffect, useRef } from "react"
+import gsap from "gsap"
 
 export default function UiOverlay() {
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const root = rootRef.current
+    if (!root) return
+
+    const ids = [
+      "left_01",
+      "left_02",
+      "left_03",
+      "left_04",
+      "left_05",
+      "left_06",
+      "left_07",
+      "left_08",
+      "left_09",
+    ]
+
+    const els = ids
+      .map((k) => root.querySelector<HTMLElement>(`[data-intro="${k}"]`))
+      .filter(Boolean) as HTMLElement[]
+
+    gsap.set(els, { opacity: 0, y: 40 })
+
+    const tl = gsap.timeline({
+      defaults: { duration: 1, ease: "power4.out" },
+      onComplete: () => {
+        // ✅ 좌측 UI intro 끝 → grid intro 시작
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event("pf_left_panel_done"))
+        }
+      },
+    })
+
+    els.forEach((el, i) => {
+      tl.to(el, { opacity: 1, y: 0 }, i * 0.04)
+    })
+
+    return () => {
+      tl.kill()
+    }
+  }, [])
+
   return (
     <div
+      ref={rootRef}
       style={{
         position: "fixed",
         inset: 0,
         pointerEvents: "none",
         zIndex: 50,
-        display: "flex",
-        alignItems: "flex-start",
-        justifyContent: "flex-start",
         padding: 44,
         boxSizing: "border-box",
         fontFamily: '"CircularStd", system-ui, -apple-system, Arial, sans-serif',
-        fontWeight: 400, // Book
+        fontWeight: 400,
       }}
     >
+      {/* ✅ LEFT PANEL BACKGROUND — PURE LINEAR GRADIENT */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          inset: 0,
+          pointerEvents: "none",
+          background:
+            // 👉 스샷/Figma 기준: 좌측 강함 → 우측 투명
+            "linear-gradient(90deg, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.7) 30%, rgba(0,0,0,0.35) 55%, rgba(0,0,0,0) 78%)",
+        }}
+      />
+
+      {/* CONTENT */}
       <div
         style={{
+          position: "relative",
+          zIndex: 1,
           width: "100%",
           height: "100%",
           display: "flex",
@@ -30,116 +88,74 @@ export default function UiOverlay() {
           gap: 10,
         }}
       >
-        {/* Header (top-left) */}
+        {/* Header */}
         <div
+          data-intro="left_01"
           style={{
             display: "grid",
-            gridTemplateColumns: "40px 1fr",
-            columnGap: 12,
-            rowGap: 10,
-            alignItems: "start",
+            gridTemplateColumns: "62px 1fr",
+            columnGap: 14,
+            rowGap: 6,
+            alignItems: "end",
           }}
         >
-          {/* logo */}
-          <img
-            src="/img/logo_w.png"
-            alt="logo"
-            style={{
-              width: 40,
-              height: 40,
-              display: "block",
-            }}
-          />
+          <img src="/img/logo_w.png" alt="logo" style={{ width: 62, height: 61, display: "block" }} />
 
-          {/* name (row 1, col 2) */}
           <div
             style={{
               color: "white",
-              fontWeight: 400,
-              fontSize: 28,
-              lineHeight: 1.2,
-              paddingTop: 2, // 로고와 베이스라인 미세 정렬
+              fontSize: 23,
+              letterSpacing: "-0.01em",
+              lineHeight: "145%",
             }}
           >
             Seong Julee
           </div>
 
-          {/* description (row 2, col 2) - 이름 아래에 정렬 */}
           <div
+            data-intro="left_02"
             style={{
-              gridColumn: "2 / 3",
+              gridColumn: "1 / 3",
+              width: 270,
               color: "white",
               opacity: 0.9,
-              maxWidth: 420,
-              fontWeight: 400,
-              fontSize: 16,
-              lineHeight: 1.35,
+              fontSize: 12,
+              letterSpacing: "-0.01em",
+              lineHeight: "145%",
             }}
           >
-            My work bridges research, strategy and storytelling to design
-            emotionally meaningful experiences for people
+            My work bridges research, strategy and storytelling to design emotionally meaningful experiences for people
           </div>
         </div>
 
-        {/* Center: 6 images (vertical stack, nowrap, fixed sizes) */}
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            flexWrap: "nowrap",
-            gap: 10,
-            pointerEvents: "none",
-          }}
-        >
-          <img
-            src="/img/intro_text_01.png"
-            alt="intro 01"
-            style={{ width: 401, height: 42.2, display: "block" }}
-          />
-          <img
-            src="/img/intro_text_02.png"
-            alt="intro 02"
-            style={{ width: 312.7, height: 30.4, display: "block" }}
-          />
-          <img
-            src="/img/intro_text_03.png"
-            alt="intro 03"
-            style={{ width: 484.6, height: 38.9, display: "block" }}
-          />
-          <img
-            src="/img/intro_text_04.png"
-            alt="intro 04"
-            style={{ width: 414.5, height: 30.6, display: "block" }}
-          />
-          <img
-            src="/img/intro_text_05.png"
-            alt="intro 05"
-            style={{ width: 352.4, height: 31.4, display: "block" }}
-          />
-          <img
-            src="/img/intro_text_06.png"
-            alt="intro 06"
-            style={{ width: 238.7, height: 38.8, display: "block" }}
-          />
+        {/* Center text images */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingBottom: 49 }}>
+          <img data-intro="left_03" src="/img/intro_text_01.png" alt="" style={{ width: 401, display: "block" }} />
+          <img data-intro="left_04" src="/img/intro_text_02.png" alt="" style={{ width: 313, display: "block" }} />
+          <img data-intro="left_05" src="/img/intro_text_03.png" alt="" style={{ width: 485, display: "block" }} />
+          <img data-intro="left_06" src="/img/intro_text_04.png" alt="" style={{ width: 415, display: "block" }} />
+          <img data-intro="left_07" src="/img/intro_text_05.png" alt="" style={{ width: 352, display: "block" }} />
+          <img data-intro="left_08" src="/img/intro_text_06.png" alt="" style={{ width: 239, display: "block" }} />
         </div>
 
-        {/* Footer (bottom-left) */}
+        {/* Footer */}
         <div
+          data-intro="left_09"
           style={{
             color: "rgba(255,255,255,0.35)",
-            fontWeight: 400,
             fontSize: 12,
-            lineHeight: 1.5,
+            letterSpacing: "-0.02em",
+            lineHeight: "145%",
             maxWidth: 520,
           }}
         >
-          <div>This website was built with code generated by Claude.</div>
+          <div>This website was built with code generated by Claude, ChatGPT and Cursor.</div>
           <div>
-            Before 2010, I worked as a Senior Designer at d’strict Creative Lab
-            and as a Senior Designer at Tangram Design Factory.
+            Before 2010, I worked as a Senior Designer at d’strict Creative Lab and as a Senior Designer at Tangram Design
+            Factory.
           </div>
         </div>
       </div>
     </div>
-  );
+  )
 }
