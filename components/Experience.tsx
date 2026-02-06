@@ -1,7 +1,8 @@
 "use client"
 
-import React, { useEffect, useMemo, useRef, useState } from "react"
+import React, { useEffect, useRef, useState } from "react"
 import gsap from "gsap"
+import DetailOverlay from "./DetailOverlay"
 
 type TileModel = { col: number; row: number; id: string }
 type TileRefs = {
@@ -178,7 +179,6 @@ export default function Experience() {
 
   // ===== easing =====
   const EASE_OUT_QUINT = "cubic-bezier(0.22,1,0.36,1)"
-  const EASE_OUT_QUAD = "cubic-bezier(0.25,0.46,0.45,0.94)"
 
   // ===== Video performance knobs =====
   const MAX_ACTIVE_VIDEOS = 6
@@ -192,15 +192,14 @@ export default function Experience() {
   const INTRO_SCALE_MIN = 0.7
   const INTRO_SPRING = { stiffness: 700, damping: 84, mass: 10 }
 
-  // ✅ intro 시작 후 N초 지나면 강제 드래그 가능
-  const INTRO_DRAG_ENABLE_AFTER = 1.0
+  // ✅ intro 시작 후 강제 드래그 허용 타이밍 (seconds)
+  const INTRO_DRAG_ENABLE_AFTER = 0
 
   // ✅ left panel gate
   const introGateReady = useRef(false)
 
-  // ✅ fallback: 이벤트 못받아도 1초 후 강제 시작
-  const INTRO_FORCE_START_MS = 1000
-  const introForceTimer = useRef<number | null>(null)
+  // ✅ gate 기준으로 드래그 허용 시간을 고정 (핵심 수정)
+  const dragEnableAtMs = useRef<number>(Infinity)
 
   // ===== manifest =====
   const [manifest, setManifest] = useState<Manifest | null>(null)
@@ -215,6 +214,14 @@ export default function Experience() {
       alive = false
     }
   }, [])
+
+  // ===== detail overlay state =====
+  const [detailOpen, setDetailOpen] = useState(false)
+  const detailOpenRef = useRef(false)
+  const selectedIdRef = useRef<string | null>(null)
+  const [detailData, setDetailData] = useState<any>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+  const panBeforeDetail = useRef({ x: 0, y: 0 })
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const gridLayerRef = useRef<HTMLDivElement | null>(null)
@@ -254,6 +261,9 @@ export default function Experience() {
   const lastP = useRef({ x: 0, y: 0 })
   const dragStartPos = useRef<{ x: number; y: number } | null>(null)
 
+  const downInfo = useRef<{ x: number; y: number; t: number } | null>(null)
+  const suppressClickUntil = useRef(0)
+
   // ---- video runtime state
   const tileIsVideo = useRef<boolean[]>([])
   const tileVideoUrl = useRef<string[]>([])
@@ -274,36 +284,29 @@ export default function Experience() {
   const introScaleV = useRef<number[]>([])
   const introOpacity = useRef<number[]>([])
 
-  // ✅ spring dt용
-  const introPrevStepMs = useRef<number>(0)
+  const introCursorSet = useRef(false)
 
-  const gridCursor = useMemo(() => {
-    if (isDown.current) return "grabbing"
-    return "grab"
-  }, [])
-
-  // ✅ left panel 완료 이벤트
+  // ✅ left panel 완료 이벤트 수신 + fallback
+  // (핵심) 드래그 가능 시점은 introStartMs가 아니라 "gate 오픈 시점" 기준으로 고정
   useEffect(() => {
-    const onDone = () => {
+    const openGate = () => {
+      if (introGateReady.current) return
       introGateReady.current = true
-      if (manifest && !introRan.current) runIntroOnce()
+      dragEnableAtMs.current = performance.now() + INTRO_DRAG_ENABLE_AFTER * 1000
     }
 
-    window.addEventListener("pf:leftIntroDone", onDone as any)
-    window.addEventListener("pf_left_panel_done", onDone as any)
+    window.addEventListener("pf_left_panel_done", openGate as any)
 
-    introForceTimer.current = window.setTimeout(() => {
-      introGateReady.current = true
-      if (manifest && !introRan.current) runIntroOnce()
-    }, INTRO_FORCE_START_MS) as any
+    const fallback = window.setTimeout(() => {
+      openGate()
+    }, 1000)
 
     return () => {
-      window.removeEventListener("pf:leftIntroDone", onDone as any)
-      window.removeEventListener("pf_left_panel_done", onDone as any)
-      if (introForceTimer.current) window.clearTimeout(introForceTimer.current)
-      introForceTimer.current = null
+      window.removeEventListener("pf_left_panel_done", openGate as any)
+      window.clearTimeout(fallback)
     }
-  }, [manifest])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function ensureArrays(n: number) {
     if (tileViewX.current.length !== n) tileViewX.current = new Array(n).fill(0)
@@ -349,15 +352,40 @@ export default function Experience() {
     } catch {}
   }
 
-  // ✅ hover 텍스트 채우기 (manifest meta 우선, 없으면 fallback)
+  function extractYearFallback(raw: string) {
+    const s = raw || ""
+    const m = s.match(/\b(19\d{2}|20\d{2})\b/)
+    return m?.[1] || ""
+  }
+
   function setHoverLabel(i: number, rawId: string) {
     const label = refsRef.current[i]?.label
     if (!label) return
 
     const nid = normalizeId(rawId)
-    const meta = manifest?.metaById?.[nid] || manifest?.metaById?.[nid.toLowerCase()]
+    const metaById = manifest?.metaById || {}
+
+    const keys = [
+      nid,
+      nid.toLowerCase(),
+      rawId,
+      (rawId || "").toLowerCase(),
+      normalizeId(rawId).replace(/\s+/g, ""),
+      normalizeId(rawId).toLowerCase().replace(/\s+/g, ""),
+    ]
+
+    let meta: { title?: string; year?: string } | undefined
+    for (const k of keys) {
+      if (metaById[k]) {
+        meta = metaById[k]
+        break
+      }
+    }
+
     const title = (meta?.title && meta.title.trim()) || prettyTitleFromId(rawId)
-    const year = (meta?.year && String(meta.year).trim()) || "—"
+    let year = (meta?.year && String(meta.year).trim()) || ""
+    if (!year) year = extractYearFallback(rawId)
+    if (!year) year = "—"
 
     label.innerHTML = `
       <div class="pf-h-title">${title}</div>
@@ -376,17 +404,18 @@ export default function Experience() {
     lastIdByTile.current[i] = rawId
 
     el.dataset.pfId = normalizeId(rawId)
-
-    // ✅ label 채우기
     setHoverLabel(i, rawId)
 
-    const src0 = srcById[rawId] ?? srcById[normalizeId(rawId)] ?? srcById[normalizeId(rawId).toLowerCase()]
+    const src0 =
+      srcById[rawId] ??
+      srcById[normalizeId(rawId)] ??
+      srcById[normalizeId(rawId).toLowerCase()]
+
     if (!src0) {
       hideBrokenImg(img)
       tileIsVideo.current[i] = false
       tileVideoUrl.current[i] = ""
       tilePosterUrl.current[i] = ""
-      el.dataset.isVideo = "0"
       stopVideo(i)
       return
     }
@@ -396,7 +425,6 @@ export default function Experience() {
 
     tileIsVideo.current[i] = isVid
     tileVideoUrl.current[i] = isVid ? src : ""
-    el.dataset.isVideo = isVid ? "1" : "0"
 
     if (!isVid) {
       tilePosterUrl.current[i] = ""
@@ -444,7 +472,6 @@ export default function Experience() {
         const row = sr + r
         const id = pickIdNoAdjRepeat(col, row, ids)
         map.set(keyOf(col, row), id)
-
         tiles.push({ col, row, id })
         refs.push({ el: null, img: null, vid: null, media: null, label: null })
         setters.push({ setX: null, setY: null })
@@ -487,20 +514,15 @@ export default function Experience() {
       settersRef.current[i].setX = gsap.quickSetter(el, "x", "px") as any
       settersRef.current[i].setY = gsap.quickSetter(el, "y", "px") as any
 
-      gsap.set(el, { opacity: 0, scale: 1 })
+      gsap.set(el, { opacity: introRan.current && !introActive.current ? 1 : 0, scale: 1 })
 
       img.onload = () => {
         img.style.display = "block"
         img.style.visibility = "visible"
         img.style.opacity = "1"
       }
-      img.onerror = () => {
-        hideBrokenImg(img)
-      }
-
-      vid.onerror = () => {
-        stopVideo(i)
-      }
+      img.onerror = () => hideBrokenImg(img)
+      vid.onerror = () => stopVideo(i)
 
       applyTileMedia(i, srcById)
     }
@@ -565,6 +587,7 @@ export default function Experience() {
   }
 
   function updateVideosForViewport(nowMs: number) {
+    if (detailOpenRef.current) return
     if (introActive.current) return
 
     const vw = viewW.current || window.innerWidth
@@ -633,7 +656,7 @@ export default function Experience() {
   }
 
   // ============================
-  // INTRO (distance 기반 delay + spring physics)
+  // INTRO (distance 기반 delay + spring physics) ✅ 유지
   // ============================
   function runIntroOnce() {
     if (introRan.current) return
@@ -691,7 +714,6 @@ export default function Experience() {
     introDelaySec.current[0] = 0
 
     introStartMs.current = performance.now()
-    introPrevStepMs.current = introStartMs.current
 
     for (let i = 0; i < tilesRef.current.length; i++) {
       const baseX = introBase.current[i].x
@@ -734,27 +756,7 @@ export default function Experience() {
     return [x2, v2] as const
   }
 
-  function finishIntroImmediately() {
-    introActive.current = false
-    // base로 스냅 + opacity/scale 정상화
-    for (let i = 0; i < tilesRef.current.length; i++) {
-      tileViewX.current[i] = introBase.current[i].x
-      tileViewY.current[i] = introBase.current[i].y
-      introOpacity.current[i] = 1
-      introScale.current[i] = 1
-      introScaleV.current[i] = 0
-      introVel.current[i].vx = 0
-      introVel.current[i].vy = 0
-      const el = refsRef.current[i]?.el
-      if (el) gsap.set(el, { opacity: 1, scale: 1 })
-    }
-  }
-
   function stepIntro(now: number) {
-    const prevMs = introPrevStepMs.current || now
-    const dt = clamp((now - prevMs) / 1000, 0.001, 0.033)
-    introPrevStepMs.current = now
-
     const t = (now - introStartMs.current) / 1000
     const n = tilesRef.current.length
     if (n <= 0) {
@@ -778,7 +780,6 @@ export default function Experience() {
       const lt = t - delay
       introOpacity.current[i] = clamp(lt / INTRO_DUR, 0, 1)
 
-      // position spring
       {
         const baseX = introBase.current[i].x
         const baseY = introBase.current[i].y
@@ -788,8 +789,8 @@ export default function Experience() {
         const vx = introVel.current[i].vx
         const vy = introVel.current[i].vy
 
-        const [nx, nvx] = stepSpring1D(px, vx, baseX, dt, k, c, m)
-        const [ny, nvy] = stepSpring1D(py, vy, baseY, dt, k, c, m)
+        const [nx, nvx] = stepSpring1D(px, vx, baseX, 1 / 60, k, c, m)
+        const [ny, nvy] = stepSpring1D(py, vy, baseY, 1 / 60, k, c, m)
 
         introPos.current[i].x = nx
         introPos.current[i].y = ny
@@ -804,7 +805,6 @@ export default function Experience() {
         if (posErr > 0.6 || velMag > 2.0) allDone = false
       }
 
-      // scale spring (1 -> min -> 1)
       {
         const s = introScale.current[i]
         const sv = introScaleV.current[i]
@@ -812,7 +812,7 @@ export default function Experience() {
         const half = INTRO_DUR * 0.5
         const target = lt < half ? INTRO_SCALE_MIN : 1
 
-        const [ns, nsv] = stepSpring1D(s, sv, target, dt, k, c, m)
+        const [ns, nsv] = stepSpring1D(s, sv, target, 1 / 60, k, c, m)
         introScale.current[i] = ns
         introScaleV.current[i] = nsv
 
@@ -829,6 +829,86 @@ export default function Experience() {
       if (!el) continue
       gsap.set(el, { opacity: introOpacity.current[i], scale: introScale.current[i] })
     }
+  }
+
+  function forceEndIntro() {
+    if (!introActive.current) return
+    introActive.current = false
+    introCursorSet.current = true
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      tileViewX.current[i] = introBase.current[i].x
+      tileViewY.current[i] = introBase.current[i].y
+      const el = refsRef.current[i]?.el
+      if (el) gsap.set(el, { opacity: 1, scale: 1 })
+    }
+    if (rootRef.current) rootRef.current.style.cursor = "grab"
+  }
+
+  // ✅ 드래그 가능 여부: "gate 오픈 시간 + N초" 기준 (핵심)
+  function canDragNow(now: number) {
+    if (!introGateReady.current) return false
+    return now >= dragEnableAtMs.current
+  }
+
+  function handleTileClick(i: number) {
+    if (performance.now() < suppressClickUntil.current) return
+    if (detailOpenRef.current) return
+    const rawId = tilesRef.current[i]?.id
+    if (!rawId) return
+
+    const t = tilesRef.current[i]
+    const vw = viewW.current || window.innerWidth
+    const vh = viewH.current || window.innerHeight
+
+    // 원래 pan 위치 저장 (reverse 용)
+    panBeforeDetail.current = { x: panTarget.current.x, y: panTarget.current.y }
+
+    // grid 전체를 pan → 클릭한 타일이 (20%, 12%) 위치로 이동
+    panTarget.current.x = vw * 0.2 - t.col * SPAN
+    panTarget.current.y = vh * 0.12 - t.row * SPAN
+    panVel.current.x = 0
+    panVel.current.y = 0
+
+    openDetail(rawId)
+  }
+
+  function openDetail(rawId: string) {
+    const id = normalizeId(rawId)
+    selectedIdRef.current = id
+    detailOpenRef.current = true
+    setDetailOpen(true)
+    setDetailLoading(true)
+    setDetailData(null)
+
+    fetch(`/api/pf-detail?id=${encodeURIComponent(id)}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.error) setDetailData(null)
+        else setDetailData(data)
+        setDetailLoading(false)
+      })
+      .catch(() => {
+        setDetailData(null)
+        setDetailLoading(false)
+      })
+  }
+
+  function beginCloseDetail() {
+    // grid pan 복귀 + blur 제거 (overlay는 아직 mounted 상태 유지)
+    panTarget.current.x = panBeforeDetail.current.x
+    panTarget.current.y = panBeforeDetail.current.y
+    panVel.current.x = 0
+    panVel.current.y = 0
+    if (gridLayerRef.current) gridLayerRef.current.style.filter = "blur(0px)"
+    if (rootRef.current) rootRef.current.style.cursor = "grab"
+  }
+
+  function closeDetail() {
+    detailOpenRef.current = false
+    selectedIdRef.current = null
+    setDetailOpen(false)
+    setDetailData(null)
+    setDetailLoading(false)
   }
 
   function tick(now: number, ids: string[], srcById: Record<string, string>) {
@@ -854,24 +934,29 @@ export default function Experience() {
       return
     }
 
+    if (!introCursorSet.current) {
+      introCursorSet.current = true
+      if (rootRef.current && !detailOpenRef.current) rootRef.current.style.cursor = "grab"
+    }
+
     const prev = lastT.current || now
-    const frameDt = clamp((now - prev) / 1000, 0, 0.05)
+    const dt = clamp((now - prev) / 1000, 0, 0.05)
     lastT.current = now
 
-    if (!isDown.current) {
-      const d = Math.exp(-FRICTION * frameDt)
+    if (!isDown.current && !detailOpenRef.current) {
+      const d = Math.exp(-FRICTION * dt)
       panVel.current.x *= d
       panVel.current.y *= d
       if (Math.abs(panVel.current.x) < 10) panVel.current.x = 0
       if (Math.abs(panVel.current.y) < 10) panVel.current.y = 0
-      panTarget.current.x += panVel.current.x * frameDt
-      panTarget.current.y += panVel.current.y * frameDt
+      panTarget.current.x += panVel.current.x * dt
+      panTarget.current.y += panVel.current.y * dt
     }
 
     {
-      const a = expAlpha(frameDt, PARALLAX_TAU)
-      const tx = isDown.current ? 0 : parallaxTarget.current.x
-      const ty = isDown.current ? 0 : parallaxTarget.current.y
+      const a = expAlpha(dt, PARALLAX_TAU)
+      const tx = isDown.current || detailOpenRef.current ? 0 : parallaxTarget.current.x
+      const ty = isDown.current || detailOpenRef.current ? 0 : parallaxTarget.current.y
       parallaxView.current.x += (tx - parallaxView.current.x) * a
       parallaxView.current.y += (ty - parallaxView.current.y) * a
     }
@@ -880,7 +965,7 @@ export default function Experience() {
       const desiredX = panTarget.current.x + parallaxView.current.x
       const desiredY = panTarget.current.y + parallaxView.current.y
       const tau = isDown.current ? PAN_VIEW_TAU_DRAG : PAN_VIEW_TAU_IDLE
-      const a = expAlpha(frameDt, tau)
+      const a = expAlpha(dt, tau)
       panView.current.x += (desiredX - panView.current.x) * a
       panView.current.y += (desiredY - panView.current.y) * a
     }
@@ -893,7 +978,7 @@ export default function Experience() {
       const baseY = tt.row * SPAN + panView.current.y
 
       const tauTile = computeTau(baseX, baseY)
-      const a = expAlpha(frameDt, tauTile)
+      const a = expAlpha(dt, tauTile)
 
       tileViewX.current[i] += (baseX - tileViewX.current[i]) * a
       tileViewY.current[i] += (baseY - tileViewY.current[i]) * a
@@ -935,28 +1020,24 @@ export default function Experience() {
     lastT.current = performance.now()
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
 
-    const canDragNow = () => {
-      if (!introGateReady.current) return false
-      if (!introRan.current) return false
-      if (!introActive.current) return true
-      const elapsed = (performance.now() - introStartMs.current) / 1000
-      return elapsed >= INTRO_DRAG_ENABLE_AFTER
-    }
-
     const onDown = (e: PointerEvent) => {
-      if (!canDragNow()) return
+      if (detailOpenRef.current) return
+      if (!introGateReady.current) return
       if (pointerId.current !== null) return
 
-      // ✅ intro 진행 중이더라도 1초 이후면 드래그 시작 가능
-      // 충돌 방지: 드래그 시작 순간 intro 즉시 종료
-      if (introActive.current) finishIntroImmediately()
+      if (!canDragNow(performance.now())) return
+
+      forceEndIntro()
 
       pointerId.current = e.pointerId
       isDown.current = true
+      if (rootRef.current) rootRef.current.style.cursor = "grabbing"
 
       lastP.current.x = e.clientX
       lastP.current.y = e.clientY
       dragStartPos.current = { x: e.clientX, y: e.clientY }
+
+      downInfo.current = { x: e.clientX, y: e.clientY, t: performance.now() }
 
       panVel.current.x = 0
       panVel.current.y = 0
@@ -965,6 +1046,7 @@ export default function Experience() {
     const onMove = (e: PointerEvent) => {
       if (!isDown.current) return
       if (pointerId.current !== e.pointerId) return
+      if (detailOpenRef.current) return
 
       const dx = e.clientX - lastP.current.x
       const dy = e.clientY - lastP.current.y
@@ -987,6 +1069,17 @@ export default function Experience() {
       if (pointerId.current !== e.pointerId) return
       isDown.current = false
       pointerId.current = null
+      if (rootRef.current && !detailOpenRef.current) rootRef.current.style.cursor = "grab"
+
+      const di = downInfo.current
+      downInfo.current = null
+      if (di) {
+        const dx = e.clientX - di.x
+        const dy = e.clientY - di.y
+        const dist = Math.hypot(dx, dy)
+        const dt = performance.now() - di.t
+        if (dist > 6 || dt > 250) suppressClickUntil.current = performance.now() + 250
+      }
     }
 
     const onResize = () => {
@@ -1017,7 +1110,7 @@ export default function Experience() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manifest])
 
-  // mouse parallax
+  // mouse parallax (intro 중은 꺼둠)
   useEffect(() => {
     let raf: number | null = null
     let mx = 0
@@ -1029,7 +1122,9 @@ export default function Experience() {
       if (raf) return
       raf = requestAnimationFrame(() => {
         raf = null
-        if (introActive.current || !introGateReady.current) return
+        if (detailOpenRef.current) return
+        if (!introGateReady.current) return
+        if (introActive.current) return
 
         const vw = Math.max(1, viewW.current || window.innerWidth)
         const vh = Math.max(1, viewH.current || window.innerHeight)
@@ -1058,21 +1153,20 @@ export default function Experience() {
         userSelect: "none",
         WebkitUserSelect: "none",
         WebkitTouchCallout: "none",
-        cursor: isDown.current ? "grabbing" : gridCursor,
+        cursor: "default",
       }}
     >
       <style>{`
-        .pf-tile:hover { z-index: 9999; }
-
+        .pf-tile { overflow: visible; }
+        .pf-tile:hover { z-index: 999; }
         .pf-media { transform: scale(1); transition: transform 600ms ${EASE_OUT_QUINT}; will-change: transform; }
         .pf-tile:hover .pf-media { transform: scale(1.3); }
 
-        /* ✅ hover label: 내용 보이게 + 아래로 충분히 */
         .pf-hover {
           position:absolute;
           left:50%;
           top:${TILE + 30}px;
-          transform:translateX(-50%) translateY(12px);
+          transform:translateX(-50%) translateY(6px);
           display:flex;
           flex-direction:column;
           align-items:center;
@@ -1085,17 +1179,14 @@ export default function Experience() {
           user-select:none;
           opacity:0;
           transition:opacity 260ms linear, transform 260ms ${EASE_OUT_QUINT};
-          z-index: 50;
+          z-index:50;
         }
-        .pf-tile:hover .pf-hover {
-          opacity:1;
-          transform:translateX(-50%) translateY(0);
-        }
+        .pf-tile:hover .pf-hover { opacity:1; transform:translateX(-50%) translateY(0); }
         .pf-h-title { font-size:14px; line-height:1.2; color:rgba(255,255,255,0.92); font-weight:500; }
-        .pf-h-year { font-size:12px; line-height:1.2; color:rgba(255,255,255,0.75); font-weight:400; }
+        .pf-h-year  { font-size:12px; line-height:1.2; color:rgba(255,255,255,0.75); font-weight:400; }
       `}</style>
 
-      <div ref={gridLayerRef} className="absolute inset-0" style={{ filter: "blur(0px)", willChange: "filter" }}>
+      <div ref={gridLayerRef} className="absolute inset-0" style={{ filter: detailOpen ? "blur(14px)" : "blur(0px)", transition: "filter 500ms cubic-bezier(0.22,1,0.36,1)", willChange: "filter" }}>
         <div className="absolute inset-0">
           {renderIds.map((i) => (
             <div
@@ -1105,7 +1196,8 @@ export default function Experience() {
                 refsRef.current[i].el = el
               }}
               className="absolute will-change-transform pf-tile"
-              style={{ width: TILE, height: TILE + 70, opacity: 0 }}
+              style={{ width: TILE, height: TILE + 70 }}
+              onClick={() => handleTileClick(i)}
             >
               <div
                 ref={(el) => {
@@ -1184,6 +1276,8 @@ export default function Experience() {
           ))}
         </div>
       </div>
+
+      <DetailOverlay open={detailOpen} loading={detailLoading} data={detailData} onBeginClose={beginCloseDetail} onClose={closeDetail} />
     </div>
   )
 }
