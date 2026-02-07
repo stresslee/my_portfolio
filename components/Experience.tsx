@@ -180,6 +180,14 @@ export default function Experience() {
   // ===== easing =====
   const EASE_OUT_QUINT = "cubic-bezier(0.22,1,0.36,1)"
 
+  // ===== Mouse trail =====
+  const TRAIL_COLOR = "255,0,0"
+  const TRAIL_MAX_POINTS = 200
+  const TRAIL_MAX_AGE_MS = 800
+  const TRAIL_FADE_DUR_MS = 400
+  const TRAIL_LINE_WIDTH_MAX = 4
+  const TRAIL_LINE_WIDTH_MIN = 0.5
+
   // ===== Video performance knobs =====
   const MAX_ACTIVE_VIDEOS = 6
   const VIDEO_VIS_MARGIN = 120
@@ -221,6 +229,7 @@ export default function Experience() {
   const selectedIdRef = useRef<string | null>(null)
   const [detailData, setDetailData] = useState<any>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [dragHintMounted, setDragHintMounted] = useState(true)
   const panBeforeDetail = useRef({ x: 0, y: 0 })
 
   const rootRef = useRef<HTMLDivElement | null>(null)
@@ -260,9 +269,26 @@ export default function Experience() {
   const pointerId = useRef<number | null>(null)
   const lastP = useRef({ x: 0, y: 0 })
   const dragStartPos = useRef<{ x: number; y: number } | null>(null)
+  const wheelLastMs = useRef(0)
+  const lastMotionAtMs = useRef(0)
+  const prevPanView = useRef({ x: 0, y: 0 })
+  const lastVideoUpdateAtMs = useRef(0)
+  const dragHintRef = useRef<HTMLDivElement | null>(null)
+  const dragHintRaf = useRef<number | null>(null)
+  const dragHintVisible = useRef(false)
+  const dragHintDismissed = useRef(false)
+  const dragHintTarget = useRef({ x: 0, y: 0 })
+  const dragHintPos = useRef({ x: 0, y: 0 })
 
   const downInfo = useRef<{ x: number; y: number; t: number } | null>(null)
   const suppressClickUntil = useRef(0)
+
+  // ---- trail refs
+  const trailCanvasRef = useRef<HTMLCanvasElement | null>(null)
+  const trailCtxRef = useRef<CanvasRenderingContext2D | null>(null)
+  const trailPoints = useRef<{ x: number; y: number; t: number }[]>([])
+  const trailFading = useRef(false)
+  const trailFadeStart = useRef(0)
 
   // ---- video runtime state
   const tileIsVideo = useRef<boolean[]>([])
@@ -306,6 +332,105 @@ export default function Experience() {
       window.clearTimeout(fallback)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  function dismissDragHint() {
+    if (dragHintDismissed.current) return
+    dragHintDismissed.current = true
+
+    const el = dragHintRef.current
+    if (!el || !dragHintVisible.current) {
+      if (dragHintRaf.current) {
+        cancelAnimationFrame(dragHintRaf.current)
+        dragHintRaf.current = null
+      }
+      dragHintVisible.current = false
+      setDragHintMounted(false)
+      return
+    }
+
+    gsap.killTweensOf(el)
+    gsap.to(el, {
+      delay: 0.4,
+      scale: 0,
+      opacity: 0,
+      duration: 0.3,
+      ease: "power2.in",
+      onComplete: () => {
+        dragHintVisible.current = false
+        if (dragHintRaf.current) {
+          cancelAnimationFrame(dragHintRaf.current)
+          dragHintRaf.current = null
+        }
+        gsap.set(el, { visibility: "hidden" })
+        setDragHintMounted(false)
+      },
+    })
+  }
+
+  useEffect(() => {
+    dragHintVisible.current = false
+    dragHintDismissed.current = false
+    setDragHintMounted(true)
+
+    const initialX = window.innerWidth * 0.5 + 10
+    const initialY = window.innerHeight * 0.5 + 10
+    dragHintTarget.current.x = initialX
+    dragHintTarget.current.y = initialY
+    dragHintPos.current.x = initialX
+    dragHintPos.current.y = initialY
+
+    requestAnimationFrame(() => {
+      const el = dragHintRef.current
+      if (!el) return
+      gsap.set(el, { x: initialX, y: initialY, scale: 0, opacity: 1, visibility: "hidden" })
+    })
+
+    const onMouseMove = (e: MouseEvent) => {
+      const x = e.clientX + 10
+      const y = e.clientY + 10
+      dragHintTarget.current.x = x
+      dragHintTarget.current.y = y
+
+      if (dragHintDismissed.current || dragHintVisible.current) return
+      const el = dragHintRef.current
+      if (!el) return
+
+      dragHintPos.current.x = x
+      dragHintPos.current.y = y
+      dragHintVisible.current = true
+      gsap.killTweensOf(el)
+      gsap.set(el, { x, y, scale: 0, opacity: 1, visibility: "visible" })
+      gsap.to(el, { scale: 1, duration: 0.3, ease: "power2.out" })
+    }
+
+    const follow = () => {
+      const el = dragHintRef.current
+      if (!el) return
+
+      const p = dragHintPos.current
+      const t = dragHintTarget.current
+      p.x += (t.x - p.x) * 0.22
+      p.y += (t.y - p.y) * 0.22
+
+      if (dragHintVisible.current) {
+        gsap.set(el, { x: p.x, y: p.y })
+      } else {
+        gsap.set(el, { x: p.x, y: p.y, scale: 0, opacity: 1, visibility: "hidden" })
+      }
+      dragHintRaf.current = requestAnimationFrame(follow)
+    }
+
+    dragHintRaf.current = requestAnimationFrame(follow)
+
+    window.addEventListener("mousemove", onMouseMove, { passive: true })
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove)
+      if (dragHintRaf.current) {
+        cancelAnimationFrame(dragHintRaf.current)
+        dragHintRaf.current = null
+      }
+    }
   }, [])
 
   function ensureArrays(n: number) {
@@ -581,14 +706,15 @@ export default function Experience() {
     const cx = baseX + TILE * 0.5
     const cy = baseY + TILE * 0.5
     const dist = Math.hypot(cx - ds.x, cy - ds.y)
-    const ring = clamp(Math.floor(dist / SPAN), 0, 10)
+    const ring = clamp(dist / SPAN, 0, 10)
     const dur = clamp(RIPPLE_BASE_DUR + ring * RIPPLE_STEP_DUR, RIPPLE_BASE_DUR, RIPPLE_MAX_DUR)
     return durToTau(dur)
   }
 
-  function updateVideosForViewport(nowMs: number) {
+  function updateVideosForViewport(nowMs: number, allowVideoWork: boolean) {
     if (detailOpenRef.current) return
     if (introActive.current) return
+    if (!allowVideoWork) return
 
     const vw = viewW.current || window.innerWidth
     const vh = viewH.current || window.innerHeight
@@ -911,6 +1037,105 @@ export default function Experience() {
     setDetailLoading(false)
   }
 
+  function resizeTrailCanvas() {
+    const cvs = trailCanvasRef.current
+    if (!cvs) return
+    const dpr = window.devicePixelRatio || 1
+    const w = viewW.current || window.innerWidth
+    const h = viewH.current || window.innerHeight
+    cvs.width = w * dpr
+    cvs.height = h * dpr
+    cvs.style.width = `${w}px`
+    cvs.style.height = `${h}px`
+    const ctx = cvs.getContext("2d")
+    if (ctx) {
+      ctx.scale(dpr, dpr)
+      trailCtxRef.current = ctx
+    }
+    trailPoints.current = []
+    trailFading.current = false
+  }
+
+  function drawTrail(now: number) {
+    const ctx = trailCtxRef.current
+    const cvs = trailCanvasRef.current
+    if (!ctx || !cvs) return
+
+    const w = viewW.current || window.innerWidth
+    const h = viewH.current || window.innerHeight
+    ctx.clearRect(0, 0, w, h)
+
+    // Don't draw when detail overlay is open
+    if (detailOpenRef.current) {
+      trailPoints.current = []
+      trailFading.current = false
+      return
+    }
+
+    const pts = trailPoints.current
+    if (pts.length < 2) return
+
+    // Prune old points (by age)
+    while (pts.length > 0 && now - pts[0].t > TRAIL_MAX_AGE_MS) {
+      pts.shift()
+    }
+    if (pts.length < 2) return
+
+    // Compute global fade alpha when fading out after drag end
+    let globalAlpha = 1
+    if (trailFading.current) {
+      const elapsed = now - trailFadeStart.current
+      globalAlpha = 1 - clamp(elapsed / TRAIL_FADE_DUR_MS, 0, 1)
+      if (globalAlpha <= 0) {
+        trailPoints.current = []
+        trailFading.current = false
+        return
+      }
+    }
+
+    const n = pts.length
+    ctx.lineCap = "round"
+    ctx.lineJoin = "round"
+
+    for (let i = 1; i < n; i++) {
+      const p0 = pts[i - 1]
+      const p1 = pts[i]
+
+      // Age-based alpha: newer points are more opaque
+      const age0 = now - p0.t
+      const age1 = now - p1.t
+      const alpha0 = clamp(1 - age0 / TRAIL_MAX_AGE_MS, 0, 1)
+      const alpha1 = clamp(1 - age1 / TRAIL_MAX_AGE_MS, 0, 1)
+      const segAlpha = (alpha0 + alpha1) * 0.5 * globalAlpha
+
+      if (segAlpha < 0.005) continue
+
+      // Line width taper: tail thin → head thick
+      const ratio = i / (n - 1)
+      const lw = TRAIL_LINE_WIDTH_MIN + (TRAIL_LINE_WIDTH_MAX - TRAIL_LINE_WIDTH_MIN) * ratio
+
+      ctx.beginPath()
+      ctx.strokeStyle = `rgba(${TRAIL_COLOR},${segAlpha})`
+      ctx.lineWidth = lw
+
+      // Use quadratic bezier for smoothness when we have 3+ points
+      if (i >= 2) {
+        const pPrev = pts[i - 2]
+        const mx0 = (pPrev.x + p0.x) * 0.5
+        const my0 = (pPrev.y + p0.y) * 0.5
+        const mx1 = (p0.x + p1.x) * 0.5
+        const my1 = (p0.y + p1.y) * 0.5
+        ctx.moveTo(mx0, my0)
+        ctx.quadraticCurveTo(p0.x, p0.y, mx1, my1)
+      } else {
+        ctx.moveTo(p0.x, p0.y)
+        ctx.lineTo(p1.x, p1.y)
+      }
+
+      ctx.stroke()
+    }
+  }
+
   function tick(now: number, ids: string[], srcById: Record<string, string>) {
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
     if (resizing.current || pendingBind.current) return
@@ -947,8 +1172,8 @@ export default function Experience() {
       const d = Math.exp(-FRICTION * dt)
       panVel.current.x *= d
       panVel.current.y *= d
-      if (Math.abs(panVel.current.x) < 10) panVel.current.x = 0
-      if (Math.abs(panVel.current.y) < 10) panVel.current.y = 0
+      if (Math.abs(panVel.current.x) < 0.01) panVel.current.x = 0
+      if (Math.abs(panVel.current.y) < 0.01) panVel.current.y = 0
       panTarget.current.x += panVel.current.x * dt
       panTarget.current.y += panVel.current.y * dt
     }
@@ -987,7 +1212,32 @@ export default function Experience() {
       settersRef.current[i]?.setY?.(tileViewY.current[i])
     }
 
-    updateVideosForViewport(now)
+    const desiredX = panTarget.current.x + parallaxView.current.x
+    const desiredY = panTarget.current.y + parallaxView.current.y
+    const panDx = panView.current.x - prevPanView.current.x
+    const panDy = panView.current.y - prevPanView.current.y
+    prevPanView.current.x = panView.current.x
+    prevPanView.current.y = panView.current.y
+
+    const movedPx = Math.hypot(panDx, panDy)
+    const velMag = Math.hypot(panVel.current.x, panVel.current.y)
+    const settleErr = Math.hypot(desiredX - panView.current.x, desiredY - panView.current.y)
+    if (isDown.current || movedPx > 0.05 || velMag > 0.1 || settleErr > 0.24) {
+      lastMotionAtMs.current = now
+    }
+    const allowVideoWork =
+      !isDown.current &&
+      now - lastMotionAtMs.current > 420 &&
+      now - wheelLastMs.current > 220 &&
+      velMag < 0.08 &&
+      settleErr < 0.18 &&
+      movedPx < 0.03
+    if (allowVideoWork && now - lastVideoUpdateAtMs.current > 120) {
+      lastVideoUpdateAtMs.current = now
+      updateVideosForViewport(now, true)
+    }
+
+    drawTrail(now)
   }
 
   useEffect(() => {
@@ -1002,6 +1252,7 @@ export default function Experience() {
       resizing.current = true
       const r = root.getBoundingClientRect()
       buildPool(Math.max(1, r.width), Math.max(1, r.height), ids)
+      resizeTrailCanvas()
 
       pendingBind.current = true
       requestAnimationFrame(() => {
@@ -1021,6 +1272,7 @@ export default function Experience() {
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
 
     const onDown = (e: PointerEvent) => {
+      dismissDragHint()
       if (detailOpenRef.current) return
       if (!introGateReady.current) return
       if (pointerId.current !== null) return
@@ -1041,6 +1293,11 @@ export default function Experience() {
 
       panVel.current.x = 0
       panVel.current.y = 0
+
+      // Trail: reset points on drag start
+      trailPoints.current = []
+      trailFading.current = false
+      trailPoints.current.push({ x: e.clientX, y: e.clientY, t: performance.now() })
     }
 
     const onMove = (e: PointerEvent) => {
@@ -1063,6 +1320,11 @@ export default function Experience() {
 
       panVel.current.x = clamp(dx / mdt, -MAX_VEL, MAX_VEL)
       panVel.current.y = clamp(dy / mdt, -MAX_VEL, MAX_VEL)
+
+      // Trail: record point
+      const tp = trailPoints.current
+      tp.push({ x: e.clientX, y: e.clientY, t: now })
+      if (tp.length > TRAIL_MAX_POINTS) tp.shift()
     }
 
     const onUp = (e: PointerEvent) => {
@@ -1070,6 +1332,12 @@ export default function Experience() {
       isDown.current = false
       pointerId.current = null
       if (rootRef.current && !detailOpenRef.current) rootRef.current.style.cursor = "grab"
+
+      // Trail: start fading
+      if (trailPoints.current.length > 0) {
+        trailFading.current = true
+        trailFadeStart.current = performance.now()
+      }
 
       const di = downInfo.current
       downInfo.current = null
@@ -1088,10 +1356,36 @@ export default function Experience() {
       resizeTimer.current = window.setTimeout(rebuild, 140)
     }
 
+    const onWheel = (e: WheelEvent) => {
+      dismissDragHint()
+      if (detailOpenRef.current) return
+      if (!introGateReady.current) return
+      forceEndIntro()
+
+      const nowMs = performance.now()
+      const startBurst = !dragStartPos.current || nowMs - wheelLastMs.current > 140
+      wheelLastMs.current = nowMs
+
+      let dy = e.deltaY
+      if (e.deltaMode === 1) dy *= 16
+      else if (e.deltaMode === 2) dy *= window.innerHeight
+
+      // 버스트 시작점에 리플 기준점을 고정해 이벤트마다 tau가 튀는 현상 방지
+      if (startBurst) {
+        dragStartPos.current = { x: e.clientX, y: e.clientY }
+      }
+
+      // wheel delta를 속도 임펄스로 넣어 드래그 릴리즈와 같은 연속 감쇠 곡선으로 통일
+      const WHEEL_TO_VEL = 13.5
+      panVel.current.y = clamp(panVel.current.y + -dy * WHEEL_TO_VEL, -MAX_VEL, MAX_VEL)
+      lastMotionAtMs.current = nowMs
+    }
+
     window.addEventListener("pointerdown", onDown, { passive: true })
     window.addEventListener("pointermove", onMove, { passive: true })
     window.addEventListener("pointerup", onUp, { passive: true })
     window.addEventListener("pointercancel", onUp, { passive: true })
+    window.addEventListener("wheel", onWheel, { passive: true })
     window.addEventListener("resize", onResize)
 
     return () => {
@@ -1099,10 +1393,12 @@ export default function Experience() {
       window.removeEventListener("pointermove", onMove)
       window.removeEventListener("pointerup", onUp)
       window.removeEventListener("pointercancel", onUp)
+      window.removeEventListener("wheel", onWheel)
       window.removeEventListener("resize", onResize)
       if (rafId.current) cancelAnimationFrame(rafId.current)
       rafId.current = null
       if (resizeTimer.current) window.clearTimeout(resizeTimer.current)
+
 
       activeVideoSet.current.forEach((idx) => stopVideo(idx))
       activeVideoSet.current.clear()
@@ -1185,6 +1481,45 @@ export default function Experience() {
         .pf-h-title { font-size:14px; line-height:1.2; color:rgba(255,255,255,0.92); font-weight:500; }
         .pf-h-year  { font-size:12px; line-height:1.2; color:rgba(255,255,255,0.75); font-weight:400; }
       `}</style>
+
+      {dragHintMounted && (
+        <div
+          ref={dragHintRef}
+          className="fixed left-0 top-0 pointer-events-none"
+          style={{
+            zIndex: 1200,
+            opacity: 1,
+            transform: "scale(0)",
+            visibility: "hidden",
+            willChange: "transform, opacity",
+          }}
+        >
+          <div
+            style={{
+              position: "relative",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: "max-content",
+              borderRadius: 30,
+              backgroundColor: "#fff",
+              padding: "10px 14px",
+              boxSizing: "border-box",
+              textAlign: "left",
+              fontSize: 11,
+              color: "#000",
+              fontFamily: "'Circular Std', sans-serif",
+              letterSpacing: "-0.01em",
+              lineHeight: "123%",
+              fontWeight: 500,
+              whiteSpace: "nowrap",
+              boxShadow: "0 8px 18px rgba(0,0,0,0.24)",
+            }}
+          >
+            Drag or Scroll
+          </div>
+        </div>
+      )}
 
       <div ref={gridLayerRef} className="absolute inset-0" style={{ filter: detailOpen ? "blur(14px)" : "blur(0px)", transition: "filter 500ms cubic-bezier(0.22,1,0.36,1)", willChange: "filter" }}>
         <div className="absolute inset-0">
@@ -1276,6 +1611,16 @@ export default function Experience() {
           ))}
         </div>
       </div>
+
+      <canvas
+        ref={trailCanvasRef}
+        style={{
+          position: "fixed",
+          inset: 0,
+          pointerEvents: "none",
+          zIndex: 60,
+        }}
+      />
 
       <DetailOverlay open={detailOpen} loading={detailLoading} data={detailData} onBeginClose={beginCloseDetail} onClose={closeDetail} />
     </div>

@@ -19,6 +19,8 @@ type Props = {
 export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, onBeginClose, onClose }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const contentRef = useRef<HTMLDivElement | null>(null)
+  const scrollThumbRef = useRef<HTMLDivElement | null>(null)
   const gradientRef = useRef<HTMLDivElement | null>(null)
   const xBtnRef = useRef<HTMLDivElement | null>(null)
 
@@ -31,11 +33,15 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
   const EASE = "cubic-bezier(0.22,1,0.36,1)"
   const BTN = 52
   const FOLLOW_LERP = 0.15
+  const SCROLLBAR_PAD = 10
 
   // smooth follow state
   const btnTarget = useRef({ x: -BTN, y: -BTN })
   const btnPos = useRef({ x: -BTN, y: -BTN })
   const followRaf = useRef<number | null>(null)
+  const scrollUiRaf = useRef<number | null>(null)
+  const scrollHideTimer = useRef<number | null>(null)
+  const scrollPendingActive = useRef(false)
 
   // persistent mouse position tracker (always on)
   const lastMouse = useRef({ x: 0, y: 0 })
@@ -59,6 +65,16 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
         cancelAnimationFrame(followRaf.current)
         followRaf.current = null
       }
+      if (scrollUiRaf.current) {
+        cancelAnimationFrame(scrollUiRaf.current)
+        scrollUiRaf.current = null
+      }
+      if (scrollHideTimer.current) {
+        window.clearTimeout(scrollHideTimer.current)
+        scrollHideTimer.current = null
+      }
+      const thumb = scrollThumbRef.current
+      if (thumb) gsap.set(thumb, { opacity: 0, y: SCROLLBAR_PAD })
     } else {
       // initialize X button position from current cursor
       const mx = lastMouse.current.x
@@ -86,7 +102,7 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
         }
       })
     }
-  }, [open])
+  }, [open, panelWidthVw])
 
   // rAF loop: smooth follow
   useEffect(() => {
@@ -185,7 +201,7 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
 
   // Lenis smooth scroll + drag-to-scroll
   useEffect(() => {
-    if (!open) return
+    if (!open || loading) return
     const host = hostRef.current
     const scroller = scrollerRef.current
     if (!host || !scroller) return
@@ -248,7 +264,89 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
       host.removeEventListener("pointerup", onUp)
       host.removeEventListener("pointercancel", onUp)
     }
-  }, [open])
+  }, [open, loading])
+
+  // custom scrollbar: scroll active only, auto-hide when idle
+  useEffect(() => {
+    if (!open) return
+    const scroller = scrollerRef.current
+    const thumb = scrollThumbRef.current
+    if (!scroller || !thumb) return
+
+    const updateThumb = (active: boolean) => {
+      const viewportH = scroller.clientHeight
+      const contentH = scroller.scrollHeight
+      const maxScroll = contentH - viewportH
+
+      if (viewportH <= 0 || maxScroll <= 1) {
+        if (scrollHideTimer.current) {
+          window.clearTimeout(scrollHideTimer.current)
+          scrollHideTimer.current = null
+        }
+        gsap.to(thumb, { opacity: 0, duration: 0.18, ease: "power2.out", overwrite: true })
+        return
+      }
+
+      const ratio = viewportH / contentH
+      const thumbH = Math.max(28, Math.min(viewportH * 0.6, viewportH * ratio))
+      const travel = Math.max(0, viewportH - thumbH - SCROLLBAR_PAD * 2)
+      const progress = maxScroll <= 0 ? 0 : scroller.scrollTop / maxScroll
+      const y = SCROLLBAR_PAD + progress * travel
+
+      thumb.style.height = `${thumbH}px`
+      gsap.set(thumb, { y })
+
+      if (active) {
+        gsap.to(thumb, { opacity: 0.4, duration: 0.12, ease: "power2.out", overwrite: true })
+        if (scrollHideTimer.current) window.clearTimeout(scrollHideTimer.current)
+        scrollHideTimer.current = window.setTimeout(() => {
+          gsap.to(thumb, { opacity: 0, duration: 0.24, ease: "power2.out", overwrite: true })
+          scrollHideTimer.current = null
+        }, 320)
+      }
+    }
+
+    const requestUpdate = (active: boolean) => {
+      if (active) scrollPendingActive.current = true
+      if (scrollUiRaf.current) return
+      scrollUiRaf.current = requestAnimationFrame(() => {
+        scrollUiRaf.current = null
+        const shouldShow = scrollPendingActive.current
+        scrollPendingActive.current = false
+        updateThumb(shouldShow)
+      })
+    }
+
+    const onScroll = () => requestUpdate(true)
+    const onResize = () => requestUpdate(false)
+
+    scroller.addEventListener("scroll", onScroll, { passive: true })
+    window.addEventListener("resize", onResize)
+
+    const ro = new ResizeObserver(() => requestUpdate(false))
+    ro.observe(scroller)
+    if (contentRef.current) ro.observe(contentRef.current)
+
+    const bootRaf = requestAnimationFrame(() => requestUpdate(false))
+    const bootTimer = window.setTimeout(() => requestUpdate(false), 80)
+
+    return () => {
+      scroller.removeEventListener("scroll", onScroll)
+      window.removeEventListener("resize", onResize)
+      ro.disconnect()
+      cancelAnimationFrame(bootRaf)
+      window.clearTimeout(bootTimer)
+      if (scrollUiRaf.current) {
+        cancelAnimationFrame(scrollUiRaf.current)
+        scrollUiRaf.current = null
+      }
+      if (scrollHideTimer.current) {
+        window.clearTimeout(scrollHideTimer.current)
+        scrollHideTimer.current = null
+      }
+      scrollPendingActive.current = false
+    }
+  }, [open, loading, data, panelWidthVw])
 
   function handleClose() {
     if (closing.current) return
@@ -299,7 +397,16 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
       style={{ pointerEvents: "auto", zIndex: 9999 }}
     >
       <style>{`
-        [data-detail-content="1"] { cursor: grab; }
+        [data-detail-content="1"] {
+          cursor: grab;
+          -ms-overflow-style: none;
+          scrollbar-width: none;
+        }
+        [data-detail-content="1"]::-webkit-scrollbar {
+          width: 0 !important;
+          height: 0 !important;
+          display: none;
+        }
         .pf-detail-grabbing [data-detail-content="1"],
         .pf-detail-grabbing { cursor: grabbing; }
       `}</style>
@@ -341,66 +448,82 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
           width: `${panelWidthVw}vw`,
           zIndex: 3,
           overflowY: "auto",
-          padding: "60px 42px 60px 88px",
+          padding: "60px 42px 60px 0",
           boxSizing: "border-box",
-          display: "flex",
-          flexDirection: "column",
-          gap: 36,
           color: "#fff",
         }}
       >
-        {!loading && (
-          <div data-detail-block style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-            <b style={{ fontSize: 24, letterSpacing: "-0.01em", lineHeight: "145%" }}>
-              {data?.title || ""}
-            </b>
-            <div style={{ fontSize: 15, letterSpacing: "-0.01em", lineHeight: "145%", color: "rgba(255,255,255,0.75)" }}>
-              {data?.year || ""}
-            </div>
-          </div>
-        )}
-
-        {!loading &&
-          data?.detailSections?.map((s, idx) => (
-            <div key={idx} data-detail-block style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-              {s.imageUrl && (
-                <img
-                  src={s.imageUrl}
-                  alt=""
-                  draggable={false}
-                  style={{
-                    pointerEvents: "none",
-                    width: "100%",
-                    height: "auto",
-                    display: "block",
-                    objectFit: "cover",
-                    userSelect: "none",
-                  }}
-                />
-              )}
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {s.headline && (
-                  <b style={{ fontSize: 18, letterSpacing: "-0.02em", lineHeight: "145%" }}>
-                    {s.headline}
-                  </b>
-                )}
-                {s.paragraph && (
-                  <div
-                    style={{
-                      fontSize: 15,
-                      letterSpacing: "-0.02em",
-                      lineHeight: "145%",
-                      color: "#b4b4b4",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {s.paragraph}
-                  </div>
-                )}
+        <div ref={contentRef} style={{ display: "flex", flexDirection: "column", gap: 36 }}>
+          {!loading && (
+            <div data-detail-block style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              <b style={{ fontSize: 24, letterSpacing: "-0.01em", lineHeight: "145%" }}>
+                {data?.title || ""}
+              </b>
+              <div style={{ fontSize: 15, letterSpacing: "-0.01em", lineHeight: "145%", color: "rgba(255,255,255,0.75)" }}>
+                {data?.year || ""}
               </div>
             </div>
-          ))}
+          )}
+
+          {!loading &&
+            data?.detailSections?.map((s, idx) => (
+              <div key={idx} data-detail-block style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+                {s.imageUrl && (
+                  <img
+                    src={s.imageUrl}
+                    alt=""
+                    draggable={false}
+                    style={{
+                      pointerEvents: "none",
+                      width: "100%",
+                      height: "auto",
+                      display: "block",
+                      objectFit: "cover",
+                      userSelect: "none",
+                    }}
+                  />
+                )}
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {s.headline && (
+                    <b style={{ fontSize: 18, letterSpacing: "-0.02em", lineHeight: "145%" }}>
+                      {s.headline}
+                    </b>
+                  )}
+                  {s.paragraph && (
+                    <div
+                      style={{
+                        fontSize: 15,
+                        letterSpacing: "-0.02em",
+                        lineHeight: "145%",
+                        color: "#b4b4b4",
+                        whiteSpace: "pre-wrap",
+                      }}
+                    >
+                      {s.paragraph}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+        </div>
       </div>
+
+      <div
+        ref={scrollThumbRef}
+        style={{
+          position: "absolute",
+          top: 0,
+          right: 10,
+          width: 3,
+          height: 28,
+          borderRadius: 999,
+          background: "#fff",
+          opacity: 0,
+          pointerEvents: "none",
+          zIndex: 5,
+          transform: `translateY(${SCROLLBAR_PAD}px)`,
+        }}
+      />
 
       {/* floating X — 순수 시각 요소, 이벤트 통과 */}
       <div
