@@ -4,7 +4,19 @@ import React, { useEffect, useLayoutEffect, useRef } from "react"
 import gsap from "gsap"
 import Lenis from "lenis"
 
-type DetailSection = { headline?: string; paragraph?: string; imageUrl?: string }
+type DetailSection = { headline?: string; paragraph?: string; imageUrl?: string; videoUrl?: string }
+
+function toDirectVideoUrl(url: string): string {
+  try {
+    const u = new URL(url)
+    if (u.hostname === "player.cloudinary.com") {
+      const cloud = u.searchParams.get("cloud_name")
+      const pub = u.searchParams.get("public_id")
+      if (cloud && pub) return `https://res.cloudinary.com/${cloud}/video/upload/${pub}.mp4`
+    }
+  } catch {}
+  return url
+}
 type DetailData = { title?: string; year?: string; slug?: string; detailSections?: DetailSection[] | null }
 
 type Props = {
@@ -468,7 +480,25 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
           {!loading &&
             data?.detailSections?.map((s, idx) => (
               <div key={idx} data-detail-block style={{ display: "flex", flexDirection: "column", gap: 24 }}>
-                {s.imageUrl && (
+                {s.videoUrl ? (
+                  <video
+                    src={toDirectVideoUrl(s.videoUrl)}
+                    autoPlay
+                    loop
+                    muted
+                    playsInline
+                    preload="metadata"
+                    draggable={false}
+                    style={{
+                      pointerEvents: "none",
+                      width: "100%",
+                      height: "auto",
+                      display: "block",
+                      objectFit: "cover",
+                      userSelect: "none",
+                    }}
+                  />
+                ) : s.imageUrl ? (
                   <img
                     src={s.imageUrl}
                     alt=""
@@ -482,7 +512,7 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
                       userSelect: "none",
                     }}
                   />
-                )}
+                ) : null}
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {s.headline && (
                     <b style={{ fontSize: 18, letterSpacing: "-0.02em", lineHeight: "145%" }}>

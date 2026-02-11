@@ -24,7 +24,8 @@ export async function GET(req: Request) {
         detailSections[]{
           headline,
           paragraph,
-          "imageUrl": image.asset->url
+          "imageUrl": image.asset->url,
+          videoUrl
         }
       }
     `

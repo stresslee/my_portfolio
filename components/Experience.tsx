@@ -16,7 +16,7 @@ type TileSetters = { setX: ((v: number) => void) | null; setY: ((v: number) => v
 
 type Manifest = {
   ids: string[]
-  srcById: Record<string, string>
+  srcsById: Record<string, string[]>
   metaById?: Record<string, { title?: string; year?: string }>
   error?: string
 }
@@ -217,7 +217,7 @@ export default function Experience() {
     fetch("/api/pf-manifest", { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => alive && setManifest(j))
-      .catch(() => alive && setManifest({ ids: [], srcById: {}, error: "manifest fetch failed" }))
+      .catch(() => alive && setManifest({ ids: [], srcsById: {}, error: "manifest fetch failed" }))
     return () => {
       alive = false
     }
@@ -470,6 +470,7 @@ export default function Experience() {
     if (!vid) return
     try {
       vid.pause()
+      vid.currentTime = 0
       vid.removeAttribute("src")
       vid.load()
       vid.style.opacity = "0"
@@ -518,7 +519,11 @@ export default function Experience() {
     `
   }
 
-  function applyTileMedia(i: number, srcById: Record<string, string>) {
+  function pickRandom(arr: string[]) {
+    return arr[Math.floor(Math.random() * arr.length)]
+  }
+
+  function applyTileMedia(i: number, srcsById: Record<string, string[]>) {
     const el = refsRef.current[i]?.el
     const img = refsRef.current[i]?.img
     const vid = refsRef.current[i]?.vid
@@ -531,10 +536,11 @@ export default function Experience() {
     el.dataset.pfId = normalizeId(rawId)
     setHoverLabel(i, rawId)
 
-    const src0 =
-      srcById[rawId] ??
-      srcById[normalizeId(rawId)] ??
-      srcById[normalizeId(rawId).toLowerCase()]
+    const pool =
+      srcsById[rawId] ??
+      srcsById[normalizeId(rawId)] ??
+      srcsById[normalizeId(rawId).toLowerCase()]
+    const src0 = pool ? pickRandom(pool) : undefined
 
     if (!src0) {
       hideBrokenImg(img)
@@ -624,7 +630,7 @@ export default function Experience() {
     setRenderIds(Array.from({ length: tiles.length }, (_, i) => i))
   }
 
-  function bindSettersAndMedia(srcById: Record<string, string>) {
+  function bindSettersAndMedia(srcsById: Record<string, string[]>) {
     const WRAP_H = TILE + 70
     const originY = (TILE * 0.5) / WRAP_H
     const originStr = `50% ${Math.round(originY * 1000) / 10}%`
@@ -649,11 +655,11 @@ export default function Experience() {
       img.onerror = () => hideBrokenImg(img)
       vid.onerror = () => stopVideo(i)
 
-      applyTileMedia(i, srcById)
+      applyTileMedia(i, srcsById)
     }
   }
 
-  function wrapIfNeeded(i: number, ids: string[], srcById: Record<string, string>) {
+  function wrapIfNeeded(i: number, ids: string[], srcsById: Record<string, string[]>) {
     const t = tilesRef.current[i]
     const vw = viewW.current
     const vh = viewH.current
@@ -692,7 +698,7 @@ export default function Experience() {
       t.id = pickIdNoAdjRepeat(t.col, t.row, ids)
       map.set(keyOf(t.col, t.row), t.id)
 
-      applyTileMedia(i, srcById)
+      applyTileMedia(i, srcsById)
 
       tileViewX.current[i] = t.col * SPAN + panView.current.x
       tileViewY.current[i] = t.row * SPAN + panView.current.y
@@ -765,6 +771,7 @@ export default function Experience() {
         } catch {}
       }
 
+      vid.loop = true
       vid.style.display = "block"
       vid.style.opacity = "0"
 
@@ -1136,8 +1143,8 @@ export default function Experience() {
     }
   }
 
-  function tick(now: number, ids: string[], srcById: Record<string, string>) {
-    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
+  function tick(now: number, ids: string[], srcsById: Record<string, string[]>) {
+    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcsById))
     if (resizing.current || pendingBind.current) return
 
     if (!introGateReady.current) {
@@ -1196,7 +1203,7 @@ export default function Experience() {
     }
 
     for (let i = 0; i < tilesRef.current.length; i++) {
-      wrapIfNeeded(i, ids, srcById)
+      wrapIfNeeded(i, ids, srcsById)
 
       const tt = tilesRef.current[i]
       const baseX = tt.col * SPAN + panView.current.x
@@ -1246,7 +1253,7 @@ export default function Experience() {
     if (!root) return
 
     const ids = manifest.ids
-    const srcById = manifest.srcById
+    const srcsById = manifest.srcsById
 
     const rebuild = () => {
       resizing.current = true
@@ -1257,7 +1264,7 @@ export default function Experience() {
       pendingBind.current = true
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          bindSettersAndMedia(srcById)
+          bindSettersAndMedia(srcsById)
           pendingBind.current = false
           resizing.current = false
           lastT.current = performance.now()
@@ -1269,7 +1276,7 @@ export default function Experience() {
 
     if (rafId.current) cancelAnimationFrame(rafId.current)
     lastT.current = performance.now()
-    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcById))
+    rafId.current = requestAnimationFrame((t) => tick(t, ids, srcsById))
 
     const onDown = (e: PointerEvent) => {
       dismissDragHint()
@@ -1545,7 +1552,7 @@ export default function Experience() {
                   height: TILE,
                   borderRadius: RADIUS,
                   overflow: "hidden",
-                  background: "rgba(255,255,255,0.07)",
+                  background: "#000",
                   boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.06)",
                 }}
               >

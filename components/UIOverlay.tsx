@@ -61,6 +61,7 @@ export default function UiOverlay() {
         fontWeight: 400,
       }}
     >
+      <style>{`[data-intro] { opacity: 0; }`}</style>
       {/* ✅ LEFT PANEL BACKGROUND — PURE LINEAR GRADIENT */}
       <div
         aria-hidden="true"
