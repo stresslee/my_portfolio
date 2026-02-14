@@ -283,6 +283,14 @@ export default function Experience() {
   const downInfo = useRef<{ x: number; y: number; t: number } | null>(null)
   const suppressClickUntil = useRef(0)
 
+  // ---- SFX refs
+  const sfxOver = useRef<HTMLAudioElement | null>(null)
+  const sfxSelect = useRef<HTMLAudioElement | null>(null)
+  useEffect(() => {
+    sfxOver.current = new Audio("/over.wav")
+    sfxSelect.current = new Audio("/select.wav")
+  }, [])
+
   // ---- trail refs
   const trailCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const trailCtxRef = useRef<CanvasRenderingContext2D | null>(null)
@@ -983,9 +991,16 @@ export default function Experience() {
     return now >= dragEnableAtMs.current
   }
 
+  function playSfx(audio: HTMLAudioElement | null) {
+    if (!audio) return
+    audio.currentTime = 0
+    audio.play().catch(() => {})
+  }
+
   function handleTileClick(i: number) {
     if (performance.now() < suppressClickUntil.current) return
     if (detailOpenRef.current) return
+    playSfx(sfxSelect.current)
     const rawId = tilesRef.current[i]?.id
     if (!rawId) return
 
@@ -1027,6 +1042,7 @@ export default function Experience() {
   }
 
   function beginCloseDetail() {
+    playSfx(sfxSelect.current)
     // grid pan 복귀 + blur 제거 (overlay는 아직 mounted 상태 유지)
     panTarget.current.x = panBeforeDetail.current.x
     panTarget.current.y = panBeforeDetail.current.y
@@ -1539,6 +1555,7 @@ export default function Experience() {
               }}
               className="absolute will-change-transform pf-tile"
               style={{ width: TILE, height: TILE + 70 }}
+              onPointerEnter={() => { if (!detailOpenRef.current) playSfx(sfxOver.current) }}
               onClick={() => handleTileClick(i)}
             >
               <div
