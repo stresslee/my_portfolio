@@ -286,9 +286,31 @@ export default function Experience() {
   // ---- SFX refs
   const sfxOver = useRef<HTMLAudioElement | null>(null)
   const sfxSelect = useRef<HTMLAudioElement | null>(null)
+  const sfxUnlocked = useRef(false)
   useEffect(() => {
     sfxOver.current = new Audio("/over.wav")
     sfxSelect.current = new Audio("/select.wav")
+
+    // Unlock audio on first user interaction (browser autoplay policy)
+    const unlock = () => {
+      if (sfxUnlocked.current) return
+      sfxUnlocked.current = true
+      try {
+        const Ctx = window.AudioContext || (window as any).webkitAudioContext
+        if (Ctx) {
+          const ctx = new Ctx()
+          ctx.resume().then(() => ctx.close()).catch(() => {})
+        }
+      } catch {}
+      window.removeEventListener("pointerdown", unlock, true)
+      window.removeEventListener("click", unlock, true)
+    }
+    window.addEventListener("pointerdown", unlock, true)
+    window.addEventListener("click", unlock, true)
+    return () => {
+      window.removeEventListener("pointerdown", unlock, true)
+      window.removeEventListener("click", unlock, true)
+    }
   }, [])
 
   // ---- trail refs
@@ -308,6 +330,7 @@ export default function Experience() {
   // ===== intro physics state =====
   const introRan = useRef(false)
   const introActive = useRef(true)
+  const imagesLoaded = useRef(false)
 
   const introStartMs = useRef<number>(0)
   const introDelaySec = useRef<number[]>([])
@@ -988,6 +1011,7 @@ export default function Experience() {
   // ✅ 드래그 가능 여부: "gate 오픈 시간 + N초" 기준 (핵심)
   function canDragNow(now: number) {
     if (!introGateReady.current) return false
+    if (!imagesLoaded.current) return false
     return now >= dragEnableAtMs.current
   }
 
@@ -1163,7 +1187,7 @@ export default function Experience() {
     rafId.current = requestAnimationFrame((t) => tick(t, ids, srcsById))
     if (resizing.current || pendingBind.current) return
 
-    if (!introGateReady.current) {
+    if (!introGateReady.current || !imagesLoaded.current) {
       for (let i = 0; i < tilesRef.current.length; i++) {
         settersRef.current[i]?.setX?.(tileViewX.current[i])
         settersRef.current[i]?.setY?.(tileViewY.current[i])
@@ -1284,6 +1308,33 @@ export default function Experience() {
           pendingBind.current = false
           resizing.current = false
           lastT.current = performance.now()
+
+          // Wait for all tile images to load before allowing intro animation
+          if (!introRan.current && !imagesLoaded.current) {
+            let remaining = 0
+            const onDone = () => {
+              remaining--
+              if (remaining <= 0) imagesLoaded.current = true
+            }
+
+            for (let i = 0; i < refsRef.current.length; i++) {
+              const img = refsRef.current[i]?.img
+              if (!img) continue
+              const src = img.getAttribute("src")
+              if (!src) continue
+              if (img.complete) continue
+              remaining++
+              img.addEventListener("load", onDone, { once: true })
+              img.addEventListener("error", onDone, { once: true })
+            }
+
+            if (remaining === 0) imagesLoaded.current = true
+
+            // Fallback: don't wait longer than 5s
+            setTimeout(() => { imagesLoaded.current = true }, 5000)
+          } else if (!imagesLoaded.current) {
+            imagesLoaded.current = true
+          }
         })
       })
     }
@@ -1382,7 +1433,7 @@ export default function Experience() {
     const onWheel = (e: WheelEvent) => {
       dismissDragHint()
       if (detailOpenRef.current) return
-      if (!introGateReady.current) return
+      if (!introGateReady.current || !imagesLoaded.current) return
       forceEndIntro()
 
       const nowMs = performance.now()
@@ -1531,7 +1582,7 @@ export default function Experience() {
               textAlign: "left",
               fontSize: 11,
               color: "#000",
-              fontFamily: "'Circular Std', sans-serif",
+              fontFamily: "'CircularStd', sans-serif",
               letterSpacing: "-0.01em",
               lineHeight: "123%",
               fontWeight: 500,

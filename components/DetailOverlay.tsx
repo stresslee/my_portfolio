@@ -267,10 +267,29 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
     host.addEventListener("pointermove", onMove)
     host.addEventListener("pointerup", onUp)
     host.addEventListener("pointercancel", onUp)
+
+    // 이미지/비디오 로드 후 Lenis limit 재계산
+    const onMediaReady = () => lenis.resize()
+    const mediaEls = scroller.querySelectorAll<HTMLImageElement | HTMLVideoElement>("img, video")
+    mediaEls.forEach((el) => {
+      if (el instanceof HTMLImageElement && !el.complete) {
+        el.addEventListener("load", onMediaReady, { once: true })
+        el.addEventListener("error", onMediaReady, { once: true })
+      } else if (el instanceof HTMLVideoElement && el.readyState < 1) {
+        el.addEventListener("loadedmetadata", onMediaReady, { once: true })
+        el.addEventListener("error", onMediaReady, { once: true })
+      }
+    })
+
+    // content 크기 변경 감지 (이미지 지연 로드 등 대응)
+    const ro = new ResizeObserver(() => lenis.resize())
+    if (contentRef.current) ro.observe(contentRef.current)
+
     return () => {
       cancelAnimationFrame(rafId)
       lenis.destroy()
       lenisRef.current = null
+      ro.disconnect()
       host.removeEventListener("pointerdown", onDown)
       host.removeEventListener("pointermove", onMove)
       host.removeEventListener("pointerup", onUp)
