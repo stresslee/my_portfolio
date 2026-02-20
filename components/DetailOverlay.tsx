@@ -263,6 +263,15 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
       try { host.releasePointerCapture(e.pointerId) } catch {}
     }
 
+    // 화면 전체에서 휠 → scroller에 그대로 전달 (Lenis가 네이티브 처리)
+    const onWheel = (e: WheelEvent) => {
+      const t = e.target as HTMLElement
+      if (t.closest("[data-detail-content='1']")) return
+      e.preventDefault()
+      scroller.dispatchEvent(new WheelEvent("wheel", e))
+    }
+    host.addEventListener("wheel", onWheel, { passive: false })
+
     host.addEventListener("pointerdown", onDown)
     host.addEventListener("pointermove", onMove)
     host.addEventListener("pointerup", onUp)
@@ -290,6 +299,7 @@ export default function DetailOverlay({ open, loading, data, panelWidthVw = 50, 
       lenis.destroy()
       lenisRef.current = null
       ro.disconnect()
+      host.removeEventListener("wheel", onWheel)
       host.removeEventListener("pointerdown", onDown)
       host.removeEventListener("pointermove", onMove)
       host.removeEventListener("pointerup", onUp)
