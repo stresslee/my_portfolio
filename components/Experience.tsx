@@ -194,11 +194,11 @@ export default function Experience() {
   const VIDEO_MIN_WATCH_MS = 180
 
   // ===== INTRO (유지) =====
-  const INTRO_DUR = 0.6
-  const INTRO_DELAY_STEP = 0.015
+  const INTRO_DUR = 0.45
+  const INTRO_DELAY_PER_RING = 0.12
   const INTRO_PULL_PX = 120
-  const INTRO_SCALE_MIN = 0.7
-  const INTRO_SPRING = { stiffness: 700, damping: 84, mass: 10 }
+  const INTRO_SCALE_MIN = 0.82
+  const INTRO_SPRING = { stiffness: 36, damping: 7, mass: 1 }
 
   // ✅ intro 시작 후 강제 드래그 허용 타이밍 (seconds)
   const INTRO_DRAG_ENABLE_AFTER = 0
@@ -855,27 +855,14 @@ export default function Experience() {
       introBase.current[i].y = baseY
     }
 
-    const order = Array.from({ length: tilesRef.current.length }, (_, i) => i)
-      .filter((i) => i !== 0)
-      .map((i) => {
-        const t = tilesRef.current[i]
-        const dx = t.col - hero.col
-        const dy = t.row - hero.row
-        const dist = Math.hypot(dx, dy)
-        const ang = Math.atan2(dy, dx)
-        return { i, dist, ang }
-      })
-      .sort((a, b) => {
-        if (a.dist !== b.dist) return a.dist - b.dist
-        return a.ang - b.ang
-      })
-      .map((o) => o.i)
-
     introDelaySec.current.fill(0)
-    for (let k = 0; k < order.length; k++) {
-      introDelaySec.current[order[k]] = (k + 1) * INTRO_DELAY_STEP
+    for (let i = 0; i < tilesRef.current.length; i++) {
+      if (i === 0) continue
+      const t = tilesRef.current[i]
+      const dx = t.col - hero.col
+      const dy = t.row - hero.row
+      introDelaySec.current[i] = Math.hypot(dx, dy) * INTRO_DELAY_PER_RING
     }
-    introDelaySec.current[0] = 0
 
     introStartMs.current = performance.now()
 
@@ -901,7 +888,7 @@ export default function Experience() {
       introVel.current[i].vx = 0
       introVel.current[i].vy = 0
 
-      introScale.current[i] = 1
+      introScale.current[i] = INTRO_SCALE_MIN
       introScaleV.current[i] = 0
       introOpacity.current[i] = 0
     }
@@ -973,8 +960,7 @@ export default function Experience() {
         const s = introScale.current[i]
         const sv = introScaleV.current[i]
 
-        const half = INTRO_DUR * 0.5
-        const target = lt < half ? INTRO_SCALE_MIN : 1
+        const target = 1
 
         const [ns, nsv] = stepSpring1D(s, sv, target, 1 / 60, k, c, m)
         introScale.current[i] = ns
