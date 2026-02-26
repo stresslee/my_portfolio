@@ -151,7 +151,7 @@ function prepareImgForNewSrc(img: HTMLImageElement) {
   img.style.opacity = "0"
 }
 
-export default function Experience() {
+export default function Experience({ initialSlug }: { initialSlug?: string } = {}) {
   // ===== Layout =====
   const TILE = 130
   const GAP = 140
@@ -1030,13 +1030,18 @@ export default function Experience() {
     openDetail(rawId)
   }
 
-  function openDetail(rawId: string) {
+  function openDetail(rawId: string, skipUrlUpdate?: boolean) {
     const id = normalizeId(rawId)
     selectedIdRef.current = id
     detailOpenRef.current = true
     setDetailOpen(true)
     setDetailLoading(true)
     setDetailData(null)
+
+    // URL 업데이트 (pushState로 slug를 주소에 반영)
+    if (!skipUrlUpdate) {
+      window.history.pushState({ slug: id }, "", `/${encodeURIComponent(id)}`)
+    }
 
     fetch(`/api/pf-detail?id=${encodeURIComponent(id)}`)
       .then((r) => r.json())
@@ -1068,6 +1073,11 @@ export default function Experience() {
     setDetailOpen(false)
     setDetailData(null)
     setDetailLoading(false)
+
+    // URL을 루트로 복원
+    if (window.location.pathname !== "/") {
+      window.history.pushState({}, "", "/")
+    }
   }
 
   function resizeTrailCanvas() {
@@ -1465,6 +1475,68 @@ export default function Experience() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [manifest])
+
+  // ===== initialSlug로 바로 디테일 오픈 + popstate 핸들링 =====
+  const initialSlugHandled = useRef(false)
+  useEffect(() => {
+    if (!manifest || !manifest.ids.length) return
+    if (initialSlugHandled.current) return
+
+    // initialSlug가 있으면 manifest 로딩 후 자동 오픈
+    if (initialSlug) {
+      initialSlugHandled.current = true
+      // 그리드 빌드 완료 대기 후 오픈 (buildPool + bindSetters 이후)
+      const wait = () => {
+        if (pendingBind.current || resizing.current) {
+          requestAnimationFrame(wait)
+          return
+        }
+        // 인트로 건너뛰고 바로 오픈
+        forceEndIntro()
+        introRan.current = true
+        introActive.current = false
+        imagesLoaded.current = true
+        introGateReady.current = true
+
+        // 해당 slug의 타일을 찾아서 pan 위치 맞추기
+        const idx = tilesRef.current.findIndex(
+          (t) => normalizeId(t.id) === normalizeId(initialSlug)
+        )
+        if (idx >= 0) {
+          const t = tilesRef.current[idx]
+          const vw = viewW.current || window.innerWidth
+          const vh = viewH.current || window.innerHeight
+          panTarget.current.x = vw * 0.2 - t.col * SPAN
+          panTarget.current.y = vh * 0.12 - t.row * SPAN
+          panView.current.x = panTarget.current.x
+          panView.current.y = panTarget.current.y
+          panVel.current.x = 0
+          panVel.current.y = 0
+        }
+        openDetail(initialSlug, true) // URL은 이미 slug 상태이므로 pushState 스킵
+      }
+      requestAnimationFrame(wait)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [manifest, initialSlug])
+
+  // ===== 브라우저 뒤로/앞으로 가기 핸들링 =====
+  useEffect(() => {
+    const onPopState = () => {
+      const path = window.location.pathname.replace(/^\//, "")
+      if (path && !detailOpenRef.current) {
+        // slug URL로 돌아왔을 때 → 디테일 오픈
+        openDetail(decodeURIComponent(path), true)
+      } else if (!path && detailOpenRef.current) {
+        // 루트로 돌아왔을 때 → 그리드 복원 + 오버레이 즉시 닫기
+        beginCloseDetail()
+        closeDetail()
+      }
+    }
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // mouse parallax (intro 중은 꺼둠)
   useEffect(() => {
